@@ -50,16 +50,19 @@ class _FakeModel:
         self.noise_scheduler = _FakeScheduler()
         self.add_noise_calls = 0
         self.timestep_shapes = []
+        self.conditional_flags = []
 
     def predict_noise(self, noisy_latents, timestep, batch, *, conditional, attn_kind):
-        del conditional, attn_kind
+        del attn_kind
         self.timestep_shapes.append(tuple(timestep.shape))
+        self.conditional_flags.append(conditional)
         assert batch.timesteps is timestep
         return torch.zeros_like(noisy_latents)
 
     def predict_x0(self, noisy_latents, timestep, batch, *, conditional, attn_kind):
-        del conditional, attn_kind
+        del attn_kind
         self.timestep_shapes.append(tuple(timestep.shape))
+        self.conditional_flags.append(conditional)
         assert batch.timesteps is timestep
         return noisy_latents
 
@@ -119,6 +122,37 @@ def test_sampling_config_rejects_unknown_keys():
         SamplingConfig.from_mapping({"solver": "dpm2"})
 
 
+def test_sampling_config_accepts_flow_unipc_and_guidance_scale():
+    config = SamplingConfig.from_mapping({
+        "scheduler": "flow_unipc",
+        "guidance_scale": 6.0,
+        "num_steps": 8,
+        "flow_shift": 8.0,
+    })
+
+    assert config.scheduler == "flow_unipc"
+    assert config.guidance_scale == 6.0
+    assert config.num_steps == 8
+    assert config.flow_shift == 8.0
+
+
+def test_sampling_config_rejects_flow_unipc_with_explicit_timesteps():
+    with pytest.raises(ValueError, match="timesteps is not supported with flow_unipc"):
+        SamplingConfig.from_mapping({
+            "scheduler": "flow_unipc",
+            "timesteps": [999, 500, 0],
+        })
+
+
+def test_sampler_uses_unconditional_prediction_for_cfg():
+    model = _FakeModel()
+    sampler = DiffusionSampler(SamplingConfig(num_steps=2, guidance_scale=2.0))
+
+    sampler.sample(model, _batch(), generator=torch.Generator().manual_seed(0))
+
+    assert model.conditional_flags == [True, False, True, False]
+
+
 def test_sampler_restores_original_batch_timestep_after_sampling():
     model = _FakeModel()
     sampler = DiffusionSampler(SamplingConfig(num_steps=2))
@@ -172,6 +206,48 @@ def test_diffusion_nft_config_uses_rl_sampler_not_dmd_pipeline():
     assert cfg.method["validation"]["num_steps"] == 40
     assert cfg.method["validation"]["num_prompts"] == 16
     assert cfg.method["validation"]["log_samples"] is True
+
+
+def test_dmdr_config_combines_rl_sampler_with_dmd_roles():
+    config_path = "examples/train/configs/rl/wan/dmdr_pick_clip.yaml"
+
+    cfg = load_run_config(config_path)
+    raw_text = open(config_path, encoding="utf-8").read()
+
+    assert cfg.method["_target_"] == "fastvideo.train.methods.rl.dmdr.DMDRMethod"
+    assert set(cfg.models) >= {"student", "old", "reference", "teacher", "critic"}
+    assert cfg.models["teacher"]["trainable"] is False
+    assert cfg.models["critic"]["trainable"] is True
+    assert cfg.method["sampling"]["scheduler"] == "flow_match_euler"
+    assert cfg.method["sampling"]["trajectory"] == "ode"
+    assert cfg.method["dmd_loss_weight"] == 1.0
+    assert cfg.method["rl_loss_weight"] == 1.0
+    assert cfg.method["cfg_uncond"]["text"] == "zero"
+    assert cfg.method["fake_score_learning_rate"] == 1.0e-5
+    assert "WanDMDPipeline" not in raw_text
+    assert "solver" not in cfg.method["sampling"]
+
+
+def test_dmdr_videoalign_config_is_video_reward_ready():
+    config_path = "examples/train/configs/rl/wan/dmdr_videoalign.yaml"
+
+    cfg = load_run_config(config_path)
+    raw_text = open(config_path, encoding="utf-8").read()
+
+    assert cfg.method["_target_"] == "fastvideo.train.methods.rl.dmdr.DMDRMethod"
+    assert cfg.method["reward_backend"] == "genrl"
+    assert cfg.method["reward_fn"]["rewards"] == {
+        "videoalign_vq": 1.0,
+        "videoalign_mq": 1.0,
+        "videoalign_ta": 1.0,
+    }
+    assert cfg.method["sampling"]["scheduler"] == "flow_unipc"
+    assert cfg.method["sampling"]["guidance_scale"] == 6.0
+    assert cfg.training.data.num_frames == 49
+    assert cfg.training.data.num_latent_t == 13
+    assert cfg.method["validation"]["every_steps"] == 5
+    assert "WanDMDPipeline" not in raw_text
+    assert "solver" not in cfg.method["sampling"]
 
 
 def test_validation_shard_indices_are_stable_and_padded():

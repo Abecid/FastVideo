@@ -1,0 +1,133 @@
+# DMDR-style joint DMD regularization + video-reward optimization for Wan 2.1 T2V 1.3B.
+#
+# This is the video counterpart to dmdr_pick_clip.yaml. It uses
+# VideoReward/VideoAlign VQ/MQ/TA rewards and Flow-UniPC sampling with
+# classifier-free guidance for a practical 4x A100-80GB experiment.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+  old:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+  reference:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+  teacher:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+  critic:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+
+method:
+  _target_: fastvideo.train.methods.rl.dmdr.DMDRMethod
+  reward_backend: genrl
+  reward_fn:
+    rewards:
+      videoalign_vq: 1.0
+      videoalign_mq: 1.0
+      videoalign_ta: 1.0
+
+  sampling:
+    num_steps: 30
+    scheduler: flow_unipc
+    trajectory: ode
+    flow_shift: 8.0
+    guidance_scale: 6.0
+
+  validation:
+    every_steps: 5
+    num_steps: 30
+    num_prompts: 8
+    batch_size: 1
+    log_samples: true
+    seed: 42
+    data_path:
+
+  sample_train_batch_size: 4
+  train_batch_size: 4
+  num_batches_per_epoch: 16
+  num_video_per_prompt: 16
+  num_inner_epochs: 1
+  timestep_fraction: 0.99
+
+  rl_loss_weight: 1.0
+  dmd_loss_weight: 0.5
+  fake_score_loss_weight: 1.0
+  real_score_guidance_scale: 1.0
+  cfg_uncond:
+    text: zero
+    on_missing: ignore
+  fake_score_learning_rate: 1.0e-5
+  fake_score_betas: [0.0, 0.999]
+  fake_score_lr_scheduler: constant
+  fake_score_max_grad_norm: 1.0
+
+  beta: 0.1
+  kl_beta: 0.0001
+  decay_type: 1
+  adv_mode: all
+  adv_clip_max: 5
+  max_grad_norm: 1.0
+  ema:
+    enabled: true
+    decay: 0.9
+    update_after_step: 0
+    validation: true
+  terminal_progress: true
+
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/dmdr_world_r1_text_only_preprocessed
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 13
+    num_height: 448
+    num_width: 832
+    num_frames: 49
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 100000
+    gradient_accumulation_steps: 32
+
+  checkpoint:
+    output_dir: outputs/wan2.1_dmdr_videoalign
+    training_state_checkpointing_steps: 10
+    checkpoints_total_limit: 3
+
+  tracker:
+    project_name: dmdr_wan
+    run_name: wan2.1_dmdr_videoalign
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+pipeline:
+  flow_shift: 8

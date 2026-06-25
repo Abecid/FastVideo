@@ -80,6 +80,11 @@ training:
     run_name: my_run
 ```
 
+## RL Examples
+
+- DMDR Wan joint distillation + RL, including the VideoAlign video reward run
+  and Modal launcher: see `examples/train/dmdr_wan.md`.
+
 ## Directory Layout
 
 ```

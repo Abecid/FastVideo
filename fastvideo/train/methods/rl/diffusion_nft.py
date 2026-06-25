@@ -27,7 +27,10 @@ from fastvideo.logger import init_logger
 from fastvideo.pipelines import TrainingBatch
 from fastvideo.train.methods.base import LogScalar, TrainingMethod
 from fastvideo.train.models.base import ModelBase
-from fastvideo.train.methods.rl.rewards import build_multi_reward_scorer
+from fastvideo.train.methods.rl.rewards import (
+    build_multi_reward_scorer,
+    normalize_reward_weights,
+)
 from fastvideo.train.methods.rl.common import (
     DiffusionSampler,
     RLValidationConfig,
@@ -163,15 +166,11 @@ class DiffusionNFTMethod(TrainingMethod):
             raise ValueError("method.adv_mode must be one of "
                              "{all, positive_only, negative_only, one_only, binary}")
 
+        self._reward_backend = str(self.method_config.get("reward_backend", "auto") or "auto").strip().lower()
         reward_fn = self.method_config.get("reward_fn", None)
-        if not isinstance(reward_fn, dict) or not reward_fn:
-            raise ValueError("method.reward_fn must be a non-empty mapping, "
-                             "for example {pickscore: 1.0, clipscore: 1.0}")
-        self._reward_fn_config = {str(k): float(v) for k, v in reward_fn.items()}
-        unsupported = sorted(set(self._reward_fn_config) - {"pickscore", "clipscore"})
-        if unsupported:
-            raise ValueError(f"Unsupported DiffusionNFT reward(s): {unsupported}. "
-                             "Only pickscore and clipscore are currently ported.")
+        self._reward_fn_config, inline_reward_backend = normalize_reward_weights(reward_fn)
+        if inline_reward_backend is not None:
+            self._reward_backend = inline_reward_backend
 
         self._reward_scorer: Any | None = None
         self._init_optimizer_and_scheduler()
@@ -255,6 +254,7 @@ class DiffusionNFTMethod(TrainingMethod):
         self._reward_scorer = build_multi_reward_scorer(
             self._reward_fn_config,
             device=self.student.device,
+            backend=self._reward_backend,
         )
 
     def _init_optimizer_and_scheduler(self) -> None:
