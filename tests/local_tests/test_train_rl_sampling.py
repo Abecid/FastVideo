@@ -224,6 +224,10 @@ def test_dmdr_config_combines_rl_sampler_with_dmd_roles():
     assert cfg.method["rl_loss_weight"] == 1.0
     assert cfg.method["cfg_uncond"]["text"] == "zero"
     assert cfg.method["fake_score_learning_rate"] == 1.0e-5
+    assert cfg.method["guidance_update_ratio"] == 5
+    assert cfg.method["dynamic_step"] == 10000
+    assert cfg.method["gen_timestep_sampling"]["type"] == "uniform"
+    assert cfg.method["dmd_timestep_sampling"]["type"] == "logit_normal"
     assert "WanDMDPipeline" not in raw_text
     assert "solver" not in cfg.method["sampling"]
 
@@ -243,6 +247,13 @@ def test_dmdr_videoalign_config_is_video_reward_ready():
     }
     assert cfg.method["sampling"]["scheduler"] == "flow_unipc"
     assert cfg.method["sampling"]["guidance_scale"] == 6.0
+    assert cfg.method["cold_start_steps"] == 20000
+    assert cfg.method["guidance_update_ratio"] == 5
+    assert cfg.method["dmd_timestep_sampling"] == {
+        "type": "logit_normal",
+        "alpha": 4.0,
+        "beta": 1.5,
+    }
     assert cfg.training.data.num_frames == 49
     assert cfg.training.data.num_latent_t == 13
     assert cfg.method["validation"]["every_steps"] == 5

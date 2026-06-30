@@ -174,20 +174,50 @@ def save_video(tensor, path):
 def load_model_from_checkpoint(model, checkpoint_dir, checkpoint_step):
     checkpoint_paths = glob.glob(os.path.join(checkpoint_dir, "checkpoint-*"))
     checkpoint_paths.sort(key=lambda x: int(x.split("-")[-1]), reverse=True)
+    root_full_ckpt = os.path.join(checkpoint_dir, "model.pth")
+    root_lora_ckpt = os.path.join(checkpoint_dir, "adapter_model.safetensors")
+    root_non_lora_ckpt = os.path.join(checkpoint_dir, "non_lora_state_dict.pth")
+    root_has_checkpoint = os.path.exists(root_full_ckpt) or (
+        os.path.exists(root_lora_ckpt) and os.path.exists(root_non_lora_ckpt)
+    )
 
     if checkpoint_step is None or checkpoint_step == -1:
         # get the latest checkpoint
-        checkpoint_path = checkpoint_paths[0]
-        print(f"===> Checkpoint step is not provided, using the latest checkpoint: {checkpoint_path}")
+        if checkpoint_paths:
+            checkpoint_path = checkpoint_paths[0]
+            print(f"===> Checkpoint step is not provided, using the latest checkpoint: {checkpoint_path}")
+        elif root_has_checkpoint:
+            checkpoint_path = checkpoint_dir
+            print(f"===> Checkpoint step is not provided, using root checkpoint: {checkpoint_path}")
+        else:
+            raise FileNotFoundError(
+                "No VideoReward checkpoint found. Expected model.pth or "
+                "adapter_model.safetensors plus non_lora_state_dict.pth in "
+                f"{checkpoint_dir}, or inside a checkpoint-* subdirectory."
+            )
     else:
         checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint-{checkpoint_step}")
         if checkpoint_path not in checkpoint_paths:
-            checkpoint_path = checkpoint_paths[0]
-            print(f"===> Checkpoint step {checkpoint_step} not found, using the latest checkpoint: {checkpoint_path}")
+            if checkpoint_paths:
+                checkpoint_path = checkpoint_paths[0]
+                print(
+                    f"===> Checkpoint step {checkpoint_step} not found, using the latest checkpoint: "
+                    f"{checkpoint_path}"
+                )
+            elif root_has_checkpoint:
+                checkpoint_path = checkpoint_dir
+                print(f"===> Checkpoint step {checkpoint_step} not found, using root checkpoint: {checkpoint_path}")
+            else:
+                raise FileNotFoundError(
+                    f"Checkpoint step {checkpoint_step} not found and no root VideoReward checkpoint exists under "
+                    f"{checkpoint_dir}."
+                )
         else:
             print(f"===> Checkpoint step {checkpoint_step} found, using the specified checkpoint: {checkpoint_path}")
 
-    checkpoint_step = checkpoint_path.split("checkpoint-")[-1].split("/")[0]
+    checkpoint_step = (
+        "root" if checkpoint_path == checkpoint_dir else checkpoint_path.split("checkpoint-")[-1].split("/")[0]
+    )
 
     full_ckpt = os.path.join(checkpoint_path, "model.pth")
     lora_ckpt = os.path.join(checkpoint_path, "adapter_model.safetensors")

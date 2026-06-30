@@ -130,7 +130,7 @@ class VideoVLMRewardInference:
         """
         inputs = self._prepare_input(inputs)
         if len(inputs) == 0:
-            raise ValueError
+            raise ValueError("The input batch is empty.")
         return inputs
 
     def prepare_batch(

@@ -267,6 +267,9 @@ def write_run_config(
     method_config["num_inner_epochs"] = int(args.inner_epochs)
     method_config["train_batch_size"] = int(args.train_batch_size)
     method_config["num_batches_per_epoch"] = int(args.num_batches_per_epoch)
+    method_config["cold_start_steps"] = int(args.cold_start_steps)
+    method_config["dynamic_step"] = int(args.dynamic_step)
+    method_config["guidance_update_ratio"] = int(args.guidance_update_ratio)
     validation_config["every_steps"] = int(args.validation_every_steps)
     validation_config["num_steps"] = int(args.validation_num_steps)
     validation_config["num_prompts"] = int(args.validation_num_prompts)
@@ -372,6 +375,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--collection-batch-size", type=int, default=4)
     parser.add_argument("--inner-epochs", type=int, default=1)
     parser.add_argument("--train-batch-size", type=int, default=4)
+    parser.add_argument("--cold-start-steps", type=int, default=0)
+    parser.add_argument("--dynamic-step", type=int, default=10000)
+    parser.add_argument("--guidance-update-ratio", type=int, default=5)
     parser.add_argument("--sample-num-steps", type=int, default=30)
     parser.add_argument("--sample-flow-shift", type=float, default=8.0)
     parser.add_argument("--sample-guidance-scale", type=float, default=6.0)
@@ -399,6 +405,12 @@ def parse_args() -> argparse.Namespace:
     args.run_config_dir = ((args.repo_root / args.run_config_dir).resolve()
                            if not args.run_config_dir.is_absolute() else args.run_config_dir)
     args.videoalign_checkpoint_path = args.videoalign_checkpoint_path or (args.cache_root / "VideoReward")
+    if args.cold_start_steps < 0:
+        raise ValueError("--cold-start-steps must be >= 0")
+    if args.dynamic_step < 0:
+        raise ValueError("--dynamic-step must be >= 0")
+    if args.guidance_update_ratio <= 0:
+        raise ValueError("--guidance-update-ratio must be positive")
     return args
 
 
@@ -460,6 +472,9 @@ def main() -> None:
         "reward_backend": reward_backend,
         "reward_map": reward_map,
         "videoalign_checkpoint_path": str(args.videoalign_checkpoint_path),
+        "cold_start_steps": args.cold_start_steps,
+        "dynamic_step": args.dynamic_step,
+        "guidance_update_ratio": args.guidance_update_ratio,
     }
     print("Prepared DMDR assets:")
     for key, value in summary.items():

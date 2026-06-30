@@ -31,6 +31,8 @@ env
 **/build/
 **.pyc
 **.txt
+!examples/train/requirements-diffusion-nft.txt
+!examples/train/requirements-dmdr.txt
 *.log
 weights/
 logs/
@@ -129,4 +131,5 @@ apps/dreamverse/web/.env.production.local
 .codex/
 .sisyphus/
 openspec/
+modal_train_dmdr.py
 fastvideo/tests/ssim/reference_videos/**

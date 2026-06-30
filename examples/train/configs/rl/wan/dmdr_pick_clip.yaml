@@ -57,6 +57,22 @@ method:
   num_video_per_prompt: 24
   num_inner_epochs: 1
   timestep_fraction: 0.99
+  cold_start_steps: 0
+  dynamic_step: 10000
+  guidance_update_ratio: 5
+  gen_timestep_sampling:
+    type: uniform
+    alpha: 1.0
+    beta: 1.0
+    discrete: true
+  dmd_timestep_sampling:
+    type: logit_normal
+    alpha: 4.0
+    beta: 1.5
+  fake_score_timestep_sampling:
+    type: logit_normal
+    alpha: 4.0
+    beta: 1.5
 
   rl_loss_weight: 1.0
   dmd_loss_weight: 1.0

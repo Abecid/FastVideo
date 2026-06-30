@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterator
+from dataclasses import dataclass
+import math
 from typing import Any
 
 import torch
@@ -27,13 +29,30 @@ from fastvideo.training.training_utils import (
 )
 
 
-class DMDRMethod(DiffusionNFTMethod):
-    """DMDR-inspired joint DMD + RL method for few-step distillation.
+@dataclass(slots=True)
+class _DMDRTimestepSamplingConfig:
+    """Reference-DMDR timestep sampler parameters.
 
-    This is a FastVideo-native baseline that combines DiffusionNFT-style
-    grouped reward advantages with a DMD fake-score critic and frozen teacher.
-    It does not claim bit-for-bit parity with the public DMDR SiT reference,
-    which also uses dynamic distribution guidance and dynamic re-noise sampling.
+    The public SiT code samples continuous DMD/guidance timesteps from a beta
+    distribution whose alpha/beta anneal to 1.0 with cosine decay over
+    ``dynamic_step``. ``kind='uniform'`` matches the cold-start generator
+    update schedule; ``kind='logit_normal'`` keeps the reference name even
+    though the released code samples from ``torch.distributions.Beta``.
+    """
+
+    kind: str = "logit_normal"
+    alpha: float = 4.0
+    beta: float = 1.5
+    discrete: bool = False
+    min_t: float = 0.001
+    max_t: float = 1.0
+
+
+class DMDRMethod(DiffusionNFTMethod):
+    """DMDR joint DMD + reward optimization for few-step distillation.
+
+    The method follows the public DMDR SiT loop at the algorithmic level while
+    using FastVideo-native Wan model wrappers and reusable RL reward scorers.
     """
 
     def __init__(
@@ -60,6 +79,23 @@ class DMDRMethod(DiffusionNFTMethod):
         self._fake_score_loss_weight = self._read_float("fake_score_loss_weight", 1.0)
         self._real_score_guidance_scale = self._read_float("real_score_guidance_scale", 1.0)
         self._fake_score_max_grad_norm = self._read_float("fake_score_max_grad_norm", self._max_grad_norm)
+        self._cold_start_steps = self._read_int("cold_start_steps", 0)
+        self._dynamic_step = self._read_int("dynamic_step", 0)
+        self._guidance_update_ratio = self._read_int("guidance_update_ratio", 1)
+        if self._guidance_update_ratio <= 0:
+            raise ValueError("method.guidance_update_ratio must be positive")
+        self._gen_timestep_sampling = self._parse_timestep_sampling(
+            "gen_timestep_sampling",
+            default=_DMDRTimestepSamplingConfig(kind="uniform", alpha=1.0, beta=1.0, discrete=True),
+        )
+        self._dmd_timestep_sampling = self._parse_timestep_sampling(
+            "dmd_timestep_sampling",
+            default=_DMDRTimestepSamplingConfig(kind="logit_normal", alpha=4.0, beta=1.5),
+        )
+        self._fake_score_timestep_sampling = self._parse_timestep_sampling(
+            "fake_score_timestep_sampling",
+            default=self._dmd_timestep_sampling,
+        )
         self._dmd_cfg_uncond = self._parse_dmd_cfg_uncond()
         self._init_critic_optimizer_and_scheduler()
 
@@ -101,16 +137,29 @@ class DMDRMethod(DiffusionNFTMethod):
         self._log_progress(f"[DMDR] outer step {iteration}: start sampling "
                            f"{self._num_batches_per_epoch} batches")
         sample_items = self._sample_epoch(data_stream, iteration)
-        self._log_progress(f"[DMDR] outer step {iteration}: scoring rewards")
-        rewards = self._score_samples(sample_items)
-        self._log_progress(f"[DMDR] outer step {iteration}: computing advantages")
-        advantages = self._compute_advantages(sample_items, rewards)
+        reward_active = self._reward_is_active(iteration)
+        if reward_active:
+            self._log_progress(f"[DMDR] outer step {iteration}: scoring rewards")
+            rewards = self._score_samples(sample_items)
+            self._log_progress(f"[DMDR] outer step {iteration}: computing advantages")
+            advantages = self._compute_advantages(sample_items, rewards)
+        else:
+            self._log_progress(f"[DMDR] outer step {iteration}: cold start DMD-only training")
+            rewards = self._zero_reward_dict(sample_items)
+            advantages = torch.zeros(
+                sum(item["latents_clean"].shape[0] for item in sample_items),
+                self._num_train_timesteps(),
+                device=self.student.device,
+                dtype=torch.float32,
+            )
         self._log_progress(f"[DMDR] outer step {iteration}: start inner training")
-        loss_map, metrics = self._inner_train(sample_items, advantages, iteration)
+        loss_map, metrics = self._inner_train(sample_items, advantages, iteration, reward_active=reward_active)
         self._update_old_model(iteration)
         metrics.update(self._reward_metrics(rewards))
-        metrics.update(self._reward_diagnostic_metrics(sample_items, rewards))
+        if reward_active:
+            metrics.update(self._reward_diagnostic_metrics(sample_items, rewards))
         metrics["dmdr/num_sampled"] = float(sum(item["latents_clean"].shape[0] for item in sample_items))
+        metrics["dmdr/reward_active"] = float(reward_active)
         return loss_map, {}, metrics
 
     def checkpoint_state(self) -> dict[str, Any]:
@@ -182,11 +231,47 @@ class DMDRMethod(DiffusionNFTMethod):
         cfg["on_missing"] = on_missing
         return cfg
 
+    def _parse_timestep_sampling(
+        self,
+        key: str,
+        *,
+        default: _DMDRTimestepSamplingConfig,
+    ) -> _DMDRTimestepSamplingConfig:
+        raw = self.method_config.get(key, None)
+        if raw is None:
+            return default
+        if not isinstance(raw, dict):
+            raise ValueError(f"method.{key} must be a mapping, got {type(raw).__name__}")
+        cfg = _DMDRTimestepSamplingConfig(
+            kind=str(raw.get("type", raw.get("kind", default.kind)) or default.kind).strip().lower(),
+            alpha=float(raw.get("alpha", default.alpha)),
+            beta=float(raw.get("beta", default.beta)),
+            discrete=bool(raw.get("discrete", default.discrete)),
+            min_t=float(raw.get("min_t", default.min_t)),
+            max_t=float(raw.get("max_t", default.max_t)),
+        )
+        if cfg.kind not in {"uniform", "logit_normal"}:
+            raise ValueError(f"method.{key}.type must be one of {{uniform, logit_normal}}")
+        if cfg.alpha <= 0.0 or cfg.beta <= 0.0:
+            raise ValueError(f"method.{key}.alpha and method.{key}.beta must be positive")
+        if not 0.0 <= cfg.min_t < cfg.max_t <= 1.0:
+            raise ValueError(f"method.{key}.min_t/max_t must satisfy 0 <= min_t < max_t <= 1")
+        return cfg
+
+    def _reward_is_active(self, iteration: int) -> bool:
+        return int(iteration) > int(self._cold_start_steps)
+
+    def _zero_reward_dict(self, sample_items: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        total = sum(item["latents_clean"].shape[0] for item in sample_items)
+        return {"avg": torch.zeros(total, device=self.student.device, dtype=torch.float32)}
+
     def _inner_train(
         self,
         sample_items: list[dict[str, Any]],
         advantages: torch.Tensor,
         iteration: int,
+        *,
+        reward_active: bool,
     ) -> tuple[dict[str, torch.Tensor], dict[str, LogScalar]]:
         self.student.transformer.train()
         self.critic.transformer.train()
@@ -204,8 +289,11 @@ class DMDRMethod(DiffusionNFTMethod):
 
         grad_accum = max(1, int(self.training_config.loop.gradient_accumulation_steps or 1))
         effective_grad_accum = grad_accum * max(1, num_train_timesteps)
-        current_accum = 0
-        optimizer_steps = 0
+        critic_accum = 0
+        student_accum = 0
+        critic_optimizer_steps = 0
+        student_optimizer_steps = 0
+        micro_step = 0
         loss_terms: dict[str, list[torch.Tensor]] = defaultdict(list)
         num_batches = max(1, total_samples // max(1, self._train_batch_size))
         training_batch_size = max(1, total_samples // num_batches)
@@ -244,32 +332,45 @@ class DMDRMethod(DiffusionNFTMethod):
                             train_sample,
                             train_adv[:, timestep_idx],
                             timestep_idx,
-                        )
-                        self.student.backward(
-                            losses["student_total_loss"],
-                            student_ctx,
-                            grad_accum_rounds=effective_grad_accum,
+                            iteration=iteration,
+                            reward_active=reward_active,
                         )
                         self.critic.backward(
                             losses["fake_score_loss"] * self._fake_score_loss_weight,
                             critic_ctx,
                             grad_accum_rounds=effective_grad_accum,
                         )
-                        current_accum += 1
+                        critic_accum += 1
+                        micro_step += 1
+                        should_update_student = micro_step % self._guidance_update_ratio == 0
+                        if should_update_student:
+                            self.student.backward(
+                                losses["student_total_loss"],
+                                student_ctx,
+                                grad_accum_rounds=effective_grad_accum,
+                            )
+                            student_accum += 1
                         for key, value in losses.items():
                             loss_terms[key].append(value.detach())
 
-                        if current_accum % effective_grad_accum == 0:
-                            self._optimizer_step()
-                            optimizer_steps += 1
+                        if critic_accum % effective_grad_accum == 0:
+                            self._critic_optimizer_step()
+                            critic_optimizer_steps += 1
+                        if should_update_student and student_accum % effective_grad_accum == 0:
+                            self._student_optimizer_step()
+                            student_optimizer_steps += 1
                     progress.update(1)
 
-        if current_accum % effective_grad_accum != 0:
-            self._optimizer_step()
-            optimizer_steps += 1
+        if critic_accum % effective_grad_accum != 0:
+            self._critic_optimizer_step()
+            critic_optimizer_steps += 1
+        if student_accum > 0 and student_accum % effective_grad_accum != 0:
+            self._student_optimizer_step()
+            student_optimizer_steps += 1
 
         self._log_progress(f"[DMDR] outer step {iteration}: finished inner training "
-                           f"({current_accum} micro-steps, {optimizer_steps} optimizer steps)")
+                           f"({micro_step} micro-steps, {student_optimizer_steps} student optimizer steps, "
+                           f"{critic_optimizer_steps} critic optimizer steps)")
 
         reduced_local = {
             key: torch.stack(values).mean() if values else torch.zeros((), device=self.student.device)
@@ -280,8 +381,10 @@ class DMDRMethod(DiffusionNFTMethod):
         metrics: dict[str, LogScalar] = {
             "dmdr/iteration": float(iteration),
             "dmdr/num_inner_epochs": float(self._num_inner_epochs),
-            "dmdr/inner_micro_steps": float(current_accum),
-            "dmdr/optimizer_steps": float(optimizer_steps),
+            "dmdr/inner_micro_steps": float(micro_step),
+            "dmdr/student_optimizer_steps": float(student_optimizer_steps),
+            "dmdr/critic_optimizer_steps": float(critic_optimizer_steps),
+            "dmdr/guidance_update_ratio": float(self._guidance_update_ratio),
             "ema/update_count": float(self._ema_update_count),
         }
         return reduced, metrics
@@ -291,9 +394,16 @@ class DMDRMethod(DiffusionNFTMethod):
         sample: dict[str, torch.Tensor],
         advantages: torch.Tensor,
         timestep_idx: int,
+        *,
+        iteration: int,
+        reward_active: bool,
     ) -> tuple[dict[str, torch.Tensor], tuple[torch.Tensor, Any], tuple[torch.Tensor, Any]]:
         x0 = sample["latents_clean"]
-        timestep = sample["timesteps"][:, timestep_idx].to(device=x0.device)
+        timestep = self._generator_training_timestep(
+            sample["timesteps"],
+            timestep_idx,
+            iteration=iteration,
+        ).to(device=x0.device)
         t = timestep.float() / float(self.student.num_train_timesteps)
         t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
         noise = torch.randn(
@@ -338,10 +448,14 @@ class DMDRMethod(DiffusionNFTMethod):
             old_prediction=old_prediction,
             reference_prediction=ref_forward_prediction,
         )
-        dmd_loss = self._distribution_matching_loss(x0_prediction, batch)
+        if not reward_active:
+            policy_loss = policy_loss.new_zeros(())
+            kl_div_loss = kl_div_loss.new_zeros(())
+        dmd_loss = self._distribution_matching_loss(x0_prediction, batch, iteration=iteration)
         fake_score_loss, critic_ctx = self._fake_score_flow_matching_loss(
             x0_prediction.detach(),
             batch,
+            iteration=iteration,
         )
         student_total_loss = self._rl_loss_weight * (policy_loss + self._kl_beta * kl_div_loss)
         student_total_loss = student_total_loss + self._dmd_loss_weight * dmd_loss
@@ -356,6 +470,22 @@ class DMDRMethod(DiffusionNFTMethod):
             **policy_metrics,
         }
         return losses, (batch.timesteps, batch.attn_metadata), critic_ctx
+
+    def _generator_training_timestep(
+        self,
+        timesteps: torch.Tensor,
+        timestep_idx: int,
+        *,
+        iteration: int,
+    ) -> torch.Tensor:
+        if self._gen_timestep_sampling.discrete:
+            return timesteps[:, timestep_idx]
+        return self._sample_train_timestep(
+            batch_size=timesteps.shape[0],
+            device=timesteps.device,
+            sampling=self._gen_timestep_sampling,
+            iteration=iteration,
+        )
 
     def _reward_policy_losses(
         self,
@@ -418,16 +548,16 @@ class DMDRMethod(DiffusionNFTMethod):
         self,
         generator_pred_x0: torch.Tensor,
         batch: Any,
+        *,
+        iteration: int,
     ) -> torch.Tensor:
         original_timesteps = batch.timesteps
         with torch.no_grad():
-            timestep = torch.randint(
-                0,
-                int(self.student.num_train_timesteps),
-                [generator_pred_x0.shape[0]],
+            timestep = self._sample_train_timestep(
+                batch_size=generator_pred_x0.shape[0],
                 device=generator_pred_x0.device,
-                dtype=torch.long,
-                generator=self.cuda_generator,
+                sampling=self._dmd_timestep_sampling,
+                iteration=iteration,
             )
             timestep = self.student.shift_and_clamp_timestep(timestep)
             noise = torch.randn(
@@ -463,7 +593,8 @@ class DMDRMethod(DiffusionNFTMethod):
                 )
             finally:
                 batch.timesteps = original_timesteps
-            real_cfg_x0 = real_uncond_x0 + (real_cond_x0 - real_uncond_x0) * self._real_score_guidance_scale
+            real_guidance_scale = self._real_guidance_scale(iteration)
+            real_cfg_x0 = real_uncond_x0 + (real_cond_x0 - real_uncond_x0) * real_guidance_scale
             reduce_dims = tuple(range(1, generator_pred_x0.ndim))
             denom = torch.abs(generator_pred_x0 - real_cfg_x0).mean(dim=reduce_dims, keepdim=True).clamp(min=1e-6)
             grad = torch.nan_to_num((faker_x0 - real_cfg_x0) / denom)
@@ -477,15 +608,15 @@ class DMDRMethod(DiffusionNFTMethod):
         self,
         generator_pred_x0: torch.Tensor,
         batch: Any,
+        *,
+        iteration: int,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, Any]]:
         original_timesteps = batch.timesteps
-        timestep = torch.randint(
-            0,
-            int(self.student.num_train_timesteps),
-            [generator_pred_x0.shape[0]],
+        timestep = self._sample_train_timestep(
+            batch_size=generator_pred_x0.shape[0],
             device=generator_pred_x0.device,
-            dtype=torch.long,
-            generator=self.cuda_generator,
+            sampling=self._fake_score_timestep_sampling,
+            iteration=iteration,
         )
         timestep = self.student.shift_and_clamp_timestep(timestep)
         noise = torch.randn(
@@ -510,16 +641,84 @@ class DMDRMethod(DiffusionNFTMethod):
         flow_matching_loss = torch.mean((pred_noise - target)**2)
         return flow_matching_loss, (timestep, batch.attn_metadata)
 
-    def _optimizer_step(self) -> None:
+    def _student_optimizer_step(self) -> None:
         self._clip_student_grads()
-        self._clip_critic_grads()
         self._student_optimizer.step()
-        self._critic_optimizer.step()
         self._student_lr_scheduler.step()
-        self._critic_lr_scheduler.step()
         self._update_ema()
         self._student_optimizer.zero_grad(set_to_none=True)
+
+    def _critic_optimizer_step(self) -> None:
+        self._clip_critic_grads()
+        self._critic_optimizer.step()
+        self._critic_lr_scheduler.step()
         self._critic_optimizer.zero_grad(set_to_none=True)
+
+    def _optimizer_step(self) -> None:
+        self._student_optimizer_step()
+        self._critic_optimizer_step()
+
+    def _sample_train_timestep(
+        self,
+        *,
+        batch_size: int,
+        device: torch.device,
+        sampling: _DMDRTimestepSamplingConfig,
+        iteration: int,
+    ) -> torch.Tensor:
+        fractions = self._sample_timestep_fraction(
+            batch_size=batch_size,
+            device=device,
+            sampling=sampling,
+            iteration=iteration,
+        )
+        timestep = fractions * float(self.student.num_train_timesteps)
+        return timestep.to(device=device, dtype=torch.float32)
+
+    def _sample_timestep_fraction(
+        self,
+        *,
+        batch_size: int,
+        device: torch.device,
+        sampling: _DMDRTimestepSamplingConfig,
+        iteration: int,
+    ) -> torch.Tensor:
+        if sampling.kind == "uniform":
+            values = torch.rand(
+                batch_size,
+                device=device,
+                dtype=torch.float32,
+                generator=self.cuda_generator,
+            )
+        else:
+            alpha, beta = self._annealed_beta_params(sampling, iteration)
+            dist = torch.distributions.Beta(
+                torch.tensor(alpha, device=device, dtype=torch.float32),
+                torch.tensor(beta, device=device, dtype=torch.float32),
+            )
+            values = dist.sample((batch_size, ))
+        return sampling.min_t + values.clamp(0, 1) * (sampling.max_t - sampling.min_t)
+
+    def _annealed_beta_params(
+        self,
+        sampling: _DMDRTimestepSamplingConfig,
+        iteration: int,
+    ) -> tuple[float, float]:
+        if self._dynamic_step <= 0:
+            return sampling.alpha, sampling.beta
+        progress = min(max(float(iteration) / float(self._dynamic_step), 0.0), 1.0)
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        alpha = 1.0 + (sampling.alpha - 1.0) * cosine_decay
+        beta = 1.0 + (sampling.beta - 1.0) * cosine_decay
+        return alpha, beta
+
+    def _real_guidance_scale(self, iteration: int) -> float:
+        if self._dynamic_step <= 0:
+            return self._real_score_guidance_scale
+        if iteration >= self._dynamic_step:
+            return 0.0
+        cosine_factor = 0.5 * (1.0 + math.cos(math.pi * float(iteration) / float(self._dynamic_step)))
+        return self._real_score_guidance_scale * cosine_factor
 
     def _clip_critic_grads(self) -> None:
         if self._fake_score_max_grad_norm <= 0.0:

@@ -83,7 +83,7 @@ training:
 ## RL Examples
 
 - DMDR Wan joint distillation + RL, including the VideoAlign video reward run
-  and Modal launcher: see `examples/train/dmdr_wan.md`.
+  and provider-independent launch path: see `examples/train/dmdr_wan.md`.
 
 ## Directory Layout
 
