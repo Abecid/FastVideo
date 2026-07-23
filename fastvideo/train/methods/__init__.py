@@ -8,6 +8,7 @@ __all__ = [
     "DMDRMethod",
     "FineTuneMethod",
     "KDMethod",
+    "RewardTiltedFlowDistillationMethod",
     "SelfForcingMethod",
     "DiffusionForcingSFTMethod",
 ]
@@ -26,6 +27,11 @@ def __getattr__(name: str) -> object:
     if name == "KDMethod":
         from fastvideo.train.methods.knowledge_distillation.kd import KDMethod
         return KDMethod
+    if name == "RewardTiltedFlowDistillationMethod":
+        from fastvideo.train.methods.knowledge_distillation.reward_tilted_flow import (
+            RewardTiltedFlowDistillationMethod,
+        )
+        return RewardTiltedFlowDistillationMethod
     if name == "SelfForcingMethod":
         from fastvideo.train.methods.distribution_matching.self_forcing import SelfForcingMethod
         return SelfForcingMethod
