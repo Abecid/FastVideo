@@ -1,0 +1,109 @@
+# Reward-Tilted Flow Distillation (RTFD) for Wan 2.1 T2V 1.3B.
+#
+# One conditional flow-matching objective performs both jobs:
+#   * project a 16-step CFG teacher into the exact 4-step Euler deployment grid;
+#   * change the projected endpoint law toward higher VideoAlign reward.
+#
+# Set method.uniform_mix=1.0 for the matched-compute plain synthetic flow-distillation
+# baseline. No old policy, reference copy, fake-score critic, policy ratio, or
+# separate RL phase is used.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+  teacher:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+    trainable: false
+    disable_custom_init_weights: true
+
+method:
+  _target_: fastvideo.train.methods.knowledge_distillation.reward_tilted_flow.RewardTiltedFlowDistillationMethod
+
+  reward_backend: genrl
+  reward_fn:
+    rewards:
+      videoalign_vq: 1.0
+      videoalign_mq: 1.0
+      videoalign_ta: 1.0
+
+  # Frozen teacher endpoint sampler. The student absorbs this CFG into its
+  # conditional 4-step field and is evaluated at guidance 1.0.
+  sampling:
+    num_steps: 16
+    scheduler: flow_match_euler
+    trajectory: ode
+    flow_shift: 8.0
+    guidance_scale: 6.0
+
+  student_num_steps: 4
+  student_guidance_scale: 1.0
+  trajectories_per_prompt: 4
+  transition_batch_size: 1
+
+  # Coverage-controlled reward tilt. 1.0 is the exact no-reward ablation.
+  reward_ess_ratio: 0.60
+  uniform_mix: 0.25
+  reward_bisection_steps: 32
+
+  cfg_uncond:
+    text: zero
+    on_missing: ignore
+  max_grad_norm: 1.0
+
+  validation:
+    every_steps: 5
+    num_steps: 4
+    num_prompts: 4
+    batch_size: 1
+    log_samples: false
+
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/rtfd_world_r1_text_only_preprocessed
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 13
+    num_height: 448
+    num_width: 832
+    num_frames: 49
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 100
+    # The method normalizes explicit transition-row weights to one and performs
+    # exactly one optimizer step per outer iteration.
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: outputs/wan2.1_rtfd_videoalign
+    training_state_checkpointing_steps: 10
+    checkpoints_total_limit: 3
+
+  tracker:
+    project_name: rtfd_wan
+    run_name: wan2.1_rtfd_videoalign
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+pipeline:
+  flow_shift: 8
