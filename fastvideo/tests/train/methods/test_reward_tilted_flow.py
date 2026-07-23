@@ -2,7 +2,7 @@
 
 import torch
 
-from fastvideo.train.methods.knowledge_distillation.reward_tilted_flow import (
+from fastvideo.train.methods.knowledge_distillation.reward_tilted_flow_utils import (
     build_deployment_flow_schedule,
     reward_tilt_weights,
 )
