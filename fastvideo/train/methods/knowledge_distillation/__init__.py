@@ -10,6 +10,8 @@ __all__ = [
     "KDMethod",
     "RTFDMethod",
     "RewardTiltedFlowDistillationMethod",
+    "RTRFDMethod",
+    "RewardTiltedReflowDistillationMethod",
 ]
 
 
@@ -22,4 +24,12 @@ def __getattr__(name: str) -> object:
         if name == "RTFDMethod":
             return RTFDMethod
         return RewardTiltedFlowDistillationMethod
+    if name in {"RTRFDMethod", "RewardTiltedReflowDistillationMethod"}:
+        from fastvideo.train.methods.knowledge_distillation.reward_tilted_reflow import (
+            RTRFDMethod,
+            RewardTiltedReflowDistillationMethod,
+        )
+        if name == "RTRFDMethod":
+            return RTRFDMethod
+        return RewardTiltedReflowDistillationMethod
     raise AttributeError(name)
