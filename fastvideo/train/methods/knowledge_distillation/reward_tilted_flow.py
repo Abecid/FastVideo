@@ -18,11 +18,17 @@ cold-start stage is used.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any
 
 import torch
 import torch.distributed as dist
 
+from fastvideo.dataset.parquet_dataset_map_style import (
+    get_parquet_files_and_length,
+    read_row_from_parquet_file,
+)
+from fastvideo.dataset.utils import collate_rows_from_parquet_schema
 from fastvideo.pipelines import TrainingBatch
 from fastvideo.train.methods.base import LogScalar, TrainingMethod
 from fastvideo.train.methods.knowledge_distillation.reward_tilted_flow_utils import (
@@ -35,7 +41,14 @@ from fastvideo.train.methods.knowledge_distillation.reward_tilted_flow_utils imp
     require_tensor,
     reward_tilt_weights,
 )
-from fastvideo.train.methods.rl.common import DiffusionSampler, SamplingConfig
+from fastvideo.train.methods.rl.common import (
+    DiffusionSampler,
+    media_to_video_array,
+    RLValidationConfig,
+    SamplingConfig,
+    validation_caption,
+    validation_shard_indices,
+)
 from fastvideo.train.methods.rl.rewards import (
     build_multi_reward_scorer,
     normalize_reward_weights,
@@ -65,7 +78,7 @@ class RewardTiltedFlowDistillationMethod(TrainingMethod):
         if self._teacher_sampling.timesteps is not None or self._teacher_sampling.sigmas is not None:
             raise ValueError("RTFD currently derives schedules from step counts")
 
-        validation = self.method_config.get("validation", {}) or {}
+        self._validation_config = RLValidationConfig.from_mapping(self.method_config.get("validation"))
         self._rtfd = RTFDConfig(
             student_num_steps=self._read_int("student_num_steps", 4),
             student_guidance_scale=self._read_float("student_guidance_scale", 1.0),
@@ -78,7 +91,7 @@ class RewardTiltedFlowDistillationMethod(TrainingMethod):
             uniform_mix=self._read_float("uniform_mix", 0.25),
             reward_bisection_steps=self._read_int("reward_bisection_steps", 32),
             max_grad_norm=self._read_float("max_grad_norm", 1.0),
-            validation_every_steps=int(validation.get("every_steps", 5) or 0),
+            validation_every_steps=self._validation_config.every_steps,
         )
         self._validate_config()
 
@@ -104,6 +117,16 @@ class RewardTiltedFlowDistillationMethod(TrainingMethod):
                 guidance_scale=self._rtfd.student_guidance_scale,
             )
         )
+        self._validation_sampler = DiffusionSampler(
+            SamplingConfig(
+                num_steps=self._validation_config.num_steps,
+                scheduler="flow_match_euler",
+                trajectory="ode",
+                flow_shift=self._flow_shift,
+                guidance_scale=self._rtfd.student_guidance_scale,
+            )
+        )
+        self._validation_items: list[tuple[int, bool, dict[str, Any]]] | None = None
 
     @property
     def _optimizer_dict(self) -> dict[str, torch.optim.Optimizer]:
@@ -131,6 +154,9 @@ class RewardTiltedFlowDistillationMethod(TrainingMethod):
     def get_lr_schedulers(self, iteration: int) -> list[Any]:
         del iteration
         return [self._student_lr_scheduler]
+
+    def on_validation_begin(self, iteration: int = 0) -> dict[str, LogScalar]:
+        return self._maybe_run_validation(iteration)
 
     def on_train_start(self) -> None:
         super().on_train_start()
@@ -277,8 +303,6 @@ class RewardTiltedFlowDistillationMethod(TrainingMethod):
         for step in range(self._rtfd.student_num_steps):
             metrics[f"rtfd/transition_{step}_mse"] = self._mean_scalar(transition_mse[step])
         metrics.update(self._reward_metrics("teacher", teacher_rewards))
-        if self._should_validate(iteration):
-            metrics.update(self._evaluate_student(raw_batch))
         return {"total_loss": total_loss}, {}, metrics
 
     def _build_rows(
@@ -335,28 +359,166 @@ class RewardTiltedFlowDistillationMethod(TrainingMethod):
                 batch.attn_metadata.VSA_sparsity = 0.0
         return batch
 
-    def _evaluate_student(self, raw_batch: dict[str, Any]) -> dict[str, LogScalar]:
+    @torch.no_grad()
+    def _maybe_run_validation(self, iteration: int) -> dict[str, LogScalar]:
+        if not self._should_validate(iteration):
+            return {}
+        if self._reward_scorer is None:
+            raise RuntimeError("RTFD reward scorer has not been initialized")
+        return self._run_validation(iteration)
+
+    @torch.no_grad()
+    def _run_validation(self, iteration: int) -> dict[str, LogScalar]:
         was_training = self.student.transformer.training
         self.student.transformer.eval()
         try:
-            with torch.no_grad():
+            config = self._validation_config
+            rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+            prepare_generator = torch.Generator(device=self.student.device).manual_seed(config.seed + 100_000 + rank)
+            validation_generator = torch.Generator(device=self.student.device).manual_seed(config.seed + rank)
+            local_rewards: dict[str, list[torch.Tensor]] = defaultdict(list)
+            local_masks: list[torch.Tensor] = []
+            local_logs: list[dict[str, Any]] = []
+            items = self._get_validation_items()
+            for start in range(0, len(items), config.batch_size):
+                batch_items = items[start:start + config.batch_size]
+                raw_batch = self._collate_validation_rows([item[2] for item in batch_items])
+                prompts = extract_prompts(raw_batch)
                 batch = self.student.prepare_batch(
                     raw_batch,
-                    generator=self.cuda_generator,
+                    generator=prepare_generator,
                     latents_source="zeros",
                 )
-                latents = self._student_sampler.sample(
+                latents = self._validation_sampler.sample(
                     self.student,
                     batch,
-                    generator=self.cuda_generator,
+                    generator=validation_generator,
                 ).latents
-                rewards = self._score_media(
-                    self.student.decode_latents(latents).detach().cpu(),
-                    extract_prompts(raw_batch),
+                media = self.student.decode_latents(latents).detach().cpu()
+                rewards = self._score_media(media, prompts)
+                valid_mask = torch.tensor(
+                    [item[1] for item in batch_items],
+                    device=self.student.device,
+                    dtype=torch.float32,
                 )
-            return self._reward_metrics("student", rewards, prefix="validation")
+                local_masks.append(valid_mask)
+                for key, value in rewards.items():
+                    local_rewards[key].append(value.to(device=self.student.device, dtype=torch.float32))
+                if config.log_samples:
+                    for sample_idx, (global_idx, valid, _) in enumerate(batch_items):
+                        if not valid:
+                            continue
+                        local_logs.append({
+                            "index": int(global_idx),
+                            "prompt": prompts[sample_idx],
+                            "video": media_to_video_array(media[sample_idx]),
+                            "rewards": {
+                                key: float(value[sample_idx].detach().float().cpu())
+                                for key, value in rewards.items()
+                            },
+                        })
+
+            if not local_rewards or not local_masks:
+                return {}
+            gathered_mask = self._gather_tensor(torch.cat(local_masks, dim=0)).bool()
+            metrics: dict[str, LogScalar] = {}
+            for key, chunks in local_rewards.items():
+                gathered_values = self._gather_tensor(torch.cat(chunks, dim=0).detach().float())
+                valid_values = gathered_values[gathered_mask]
+                if valid_values.numel() > 0:
+                    metrics[f"validation/reward/{key}"] = valid_values.mean()
+            metrics["validation/num_prompts"] = gathered_mask.float().sum()
+            if config.log_samples:
+                self._log_validation_samples(local_logs, iteration)
+            return metrics
         finally:
             self.student.transformer.train(was_training)
+
+    def _log_validation_samples(
+        self,
+        local_logs: list[dict[str, Any]],
+        iteration: int,
+    ) -> None:
+        gathered_logs: list[list[dict[str, Any]]] = [local_logs]
+        rank = 0
+        if dist.is_available() and dist.is_initialized():
+            rank = dist.get_rank()
+            gathered_logs = [[] for _ in range(dist.get_world_size())]
+            dist.all_gather_object(gathered_logs, local_logs)
+        if rank != 0 or self.tracker is None:
+            return
+
+        artifacts = []
+        logs = sorted(
+            (log for rank_logs in gathered_logs for log in rank_logs),
+            key=lambda item: int(item["index"]),
+        )
+        for item in logs:
+            artifact = self.tracker.video(
+                item["video"],
+                caption=validation_caption(item["prompt"], item["rewards"]),
+                fps=1,
+            )
+            if artifact is not None:
+                artifacts.append(artifact)
+        if artifacts:
+            self.tracker.log_artifacts({"validation/videos": artifacts}, step=iteration)
+
+    def _get_validation_items(self) -> list[tuple[int, bool, dict[str, Any]]]:
+        if self._validation_items is not None:
+            return self._validation_items
+
+        dataset = getattr(getattr(self.student, "dataloader", None), "dataset", None)
+        if dataset is None:
+            raise RuntimeError("RTFD validation requires the student dataloader dataset")
+        data_path = self._validation_config.data_path or getattr(dataset, "path", None)
+        if not data_path:
+            data_path = self.training_config.data.data_path
+        if self._validation_config.data_path is None or data_path == getattr(dataset, "path", None):
+            parquet_files = list(dataset.parquet_files)
+            lengths = list(dataset.lengths)
+        else:
+            parquet_files, lengths = get_parquet_files_and_length(data_path)
+            parquet_files = list(parquet_files)
+            lengths = list(lengths)
+
+        total_rows = int(sum(lengths))
+        if total_rows <= 0:
+            raise RuntimeError(f"Validation data_path {data_path!r} has no rows")
+        num_prompts = min(self._validation_config.num_prompts, total_rows)
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+        items: list[tuple[int, bool, dict[str, Any]]] = []
+        for prompt_idx, valid in validation_shard_indices(
+            num_prompts,
+            rank=rank,
+            world_size=world_size,
+        ):
+            row = read_row_from_parquet_file(parquet_files, prompt_idx, lengths)
+            row["_sample_index"] = prompt_idx
+            items.append((prompt_idx, valid, row))
+        self._validation_items = items
+        return items
+
+    def _collate_validation_rows(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        dataset = getattr(getattr(self.student, "dataloader", None), "dataset", None)
+        if dataset is None or not hasattr(dataset, "parquet_schema"):
+            raise RuntimeError("RTFD requires a parquet-backed student dataset")
+        return collate_rows_from_parquet_schema(
+            rows,
+            dataset.parquet_schema,
+            int(getattr(dataset, "text_padding_length", 512)),
+            cfg_rate=0.0,
+            seed=self._validation_config.seed,
+        )
+
+    @staticmethod
+    def _gather_tensor(tensor: torch.Tensor) -> torch.Tensor:
+        if not dist.is_available() or not dist.is_initialized():
+            return tensor
+        gathered = [torch.empty_like(tensor) for _ in range(dist.get_world_size())]
+        dist.all_gather(gathered, tensor)
+        return torch.cat(gathered, dim=0)
 
     def _score_media(self, media: torch.Tensor, prompts: list[str]) -> dict[str, torch.Tensor]:
         if self._reward_scorer is None:

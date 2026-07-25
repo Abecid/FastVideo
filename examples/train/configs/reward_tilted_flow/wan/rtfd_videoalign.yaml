@@ -54,7 +54,8 @@ method:
     num_steps: 4
     num_prompts: 4
     batch_size: 1
-    log_samples: false
+    log_samples: true
+    seed: 42
 
 training:
   distributed:

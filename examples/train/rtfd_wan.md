@@ -82,13 +82,16 @@ NUM_GPUS=4 bash examples/train/run.sh \
 
 ## Modal launch
 
-Create a secret once:
+Load the Hugging Face and W&B credentials directly from the checkout's `.env`
+file (or set `RTFD_DOTENV_PATH` to start the search from another path):
 
 ```bash
-modal secret create fastvideo-training \
-  HF_TOKEN="$HF_TOKEN" \
-  WANDB_API_KEY="$WANDB_API_KEY"
+HF_TOKEN=hf_...
+WANDB_API_KEY=...
 ```
+
+The launcher passes these values to the Modal function as an ephemeral secret;
+no named Modal secret is required.
 
 Run a cheap pipeline smoke test:
 

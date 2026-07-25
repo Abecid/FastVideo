@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 
 import modal
@@ -26,12 +27,15 @@ DEFAULT_IMAGE = "ghcr.io/hao-ai-lab/fastvideo/fastvideo-dev:latest"
 
 IMAGE_REF = os.environ.get("FASTVIDEO_MODAL_IMAGE", DEFAULT_IMAGE)
 GPU = os.environ.get("RTFD_MODAL_GPU", "H100:4")
-SECRET_NAME = os.environ.get("RTFD_MODAL_SECRET", "fastvideo-training")
+DOTENV_START = os.environ.get("RTFD_DOTENV_PATH", __file__)
+LOCAL_RTFD_METHOD = "fastvideo/train/methods/knowledge_distillation/reward_tilted_flow.py"
+REMOTE_RTFD_METHOD = Path("/opt/fastvideo-local/reward_tilted_flow.py")
 
 image = (
     modal.Image.from_registry(IMAGE_REF, add_python="3.12")
     .apt_install("git", "ffmpeg")
     .run_commands("python -m pip install --upgrade uv")
+    .add_local_file(LOCAL_RTFD_METHOD, str(REMOTE_RTFD_METHOD), copy=True)
 )
 
 app = modal.App("fastvideo-rtfd")
@@ -51,7 +55,7 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     memory=131072,
     timeout=86_400,
     startup_timeout=4_800,
-    secrets=[modal.Secret.from_name(SECRET_NAME)],
+    secrets=[modal.Secret.from_dotenv(DOTENV_START)],
     volumes={
         "/root/.cache/huggingface": hf_cache,
         "/runs": runs,
@@ -89,10 +93,10 @@ def train(
     workspace.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
+    env.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
     env.update(
         {
             "HF_HOME": "/root/.cache/huggingface",
-            "HF_HUB_ENABLE_HF_TRANSFER": "1",
             "TOKENIZERS_PARALLELISM": "false",
             "VIDEOALIGN_CHECKPOINT_PATH": "/runs/cache/rtfd/VideoReward",
             "WANDB_MODE": "online" if (env.get("WANDB_API_KEY") or "").strip() else "offline",
@@ -106,9 +110,13 @@ def train(
         cwd=workspace,
         env=env,
     )
-    _run(["uv", "pip", "install", "-e", "."], cwd=repo, env=env)
+    shutil.copy2(
+        REMOTE_RTFD_METHOD,
+        repo / "fastvideo/train/methods/knowledge_distillation/reward_tilted_flow.py",
+    )
+    _run(["uv", "pip", "install", "--system", "-e", "."], cwd=repo, env=env)
     _run(
-        ["uv", "pip", "install", "-r", "examples/train/requirements-dmdr.txt"],
+        ["uv", "pip", "install", "--system", "-r", "examples/train/requirements-dmdr.txt"],
         cwd=repo,
         env=env,
     )
@@ -213,6 +221,8 @@ for stale in (
 ):
     method.pop(stale, None)
 method['validation']['num_steps'] = {student_steps!r}
+method['validation']['log_samples'] = True
+method['validation']['seed'] = 42
 cfg['training']['loop']['gradient_accumulation_steps'] = 1
 cfg['training']['checkpoint']['output_dir'] = {str(output_dir)!r}
 cfg['training']['tracker']['project_name'] = 'rtfd_wan'
