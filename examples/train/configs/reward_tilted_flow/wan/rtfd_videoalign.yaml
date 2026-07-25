@@ -1,12 +1,12 @@
-# Reward-Tilted Flow Distillation (RTFD) for Wan 2.1 T2V 1.3B.
+# Motion-preserving Reward-Tilted Reflow Distillation for Wan 2.1 T2V 1.3B.
 #
-# One conditional flow-matching objective performs both jobs:
-#   * project a 16-step CFG teacher into the exact 4-step Euler deployment grid;
-#   * change the projected endpoint law toward higher VideoAlign reward.
+# The frozen teacher supplies paired (initial Gaussian noise, terminal video)
+# trajectories. Reward tilts those teacher trajectories, and the student learns
+# the paired reflow field on a balanced four-step deployment grid.
 #
-# Set method.uniform_mix=1.0 for the matched-compute plain synthetic flow-distillation
-# baseline. No old policy, reference copy, fake-score critic, policy ratio, or
-# separate RL phase is used.
+# Set method.uniform_mix=1.0 for the exact matched-compute no-reward baseline.
+# Set method.coupling_mode=independent to reproduce the original endpoint-only
+# RTFD ablation that discarded the teacher noise/video assignment.
 
 models:
   student:
@@ -20,7 +20,7 @@ models:
     disable_custom_init_weights: true
 
 method:
-  _target_: fastvideo.train.methods.knowledge_distillation.reward_tilted_flow.RewardTiltedFlowDistillationMethod
+  _target_: fastvideo.train.methods.knowledge_distillation.reward_tilted_reflow.RewardTiltedReflowDistillationMethod
 
   reward_backend: genrl
   reward_fn:
@@ -29,8 +29,7 @@ method:
       videoalign_mq: 1.0
       videoalign_ta: 1.0
 
-  # Frozen teacher endpoint sampler. The student absorbs this CFG into its
-  # conditional 4-step field and is evaluated at guidance 1.0.
+  # Frozen high-quality teacher endpoint sampler.
   sampling:
     num_steps: 16
     scheduler: flow_match_euler
@@ -40,8 +39,21 @@ method:
 
   student_num_steps: 4
   student_guidance_scale: 1.0
+
+  # Keep the teacher's original noise -> video pairing. This is the main
+  # motion-preserving reflow correction.
+  coupling_mode: teacher_noise
+
+  # The teacher may use Wan's high shift for quality, while a separate balanced
+  # four-step student schedule avoids one ~79%-of-path Euler jump.
+  student_flow_shift: 1.0
+
   trajectories_per_prompt: 4
   transition_batch_size: 1
+
+  # Normalize VQ/MQ/TA independently inside each prompt before scalarization so
+  # text alignment cannot silently dominate motion because of scale.
+  reward_aggregation: component_zscore
 
   # Coverage-controlled reward tilt. 1.0 is the exact no-reward ablation.
   reward_ess_ratio: 0.60
@@ -52,9 +64,11 @@ method:
   validation:
     every_steps: 5
     num_steps: 4
-    num_prompts: 4
+    num_prompts: 8
     batch_size: 1
     log_samples: true
+    max_log_videos: 8
+    fps: 8
     seed: 42
 
 training:
@@ -86,18 +100,16 @@ training:
 
   loop:
     max_train_steps: 100
-    # The method normalizes explicit transition-row weights to one and performs
-    # exactly one optimizer step per outer iteration.
     gradient_accumulation_steps: 1
 
   checkpoint:
-    output_dir: outputs/wan2.1_rtfd_videoalign
+    output_dir: outputs/wan2.1_rtrfd_videoalign
     training_state_checkpointing_steps: 10
     checkpoints_total_limit: 3
 
   tracker:
     project_name: rtfd_wan
-    run_name: wan2.1_rtfd_videoalign
+    run_name: wan2.1_rtrfd_videoalign
 
   model:
     enable_gradient_checkpointing_type: full
