@@ -1,0 +1,104 @@
+# Video Posterior Transition Distillation (VPTD) on released AnyFlow-Wan.
+#
+# Scientific defaults and provenance:
+#   AnyFlow Wan2.1-1.3B released configs:
+#     checkpoint, 81 frames, 480x832, flow shift 5, CFG 1, 4-step eval,
+#     LoRA r=alpha=256 and exact post-training targets, AdamW 2e-6/(0,0.999), EMA .99,
+#     200-step EMA warmup, 1200 on-policy updates.
+#   Flow-Map GRPO Appendix C.1:
+#     K=4 stochastic transitions, clip=1e-4, advantage clip=5,
+#     group-normalization epsilon=1e-4.
+#   Released Flow-GRPO Wan configuration:
+#     G=4 videos per prompt, the video-domain rollout group size.
+#   Flow-Map GRPO Eq. (13):
+#     exact endpoint-anchor conditional; no arbitrary noise multiplier/floor.
+#   BranchGRPO / Flow-GRPO-Fast:
+#     branch one shared-prefix transition per update for local credit.
+#   Diamond Maps + Pyro SMCFilter:
+#     Feynman-Kac reward tilt with the released half-particle ESS threshold.
+#   AWM / reward-weighted regression:
+#     forward-KL projection of the reward-tilted posterior into the LoRA policy.
+#
+# Optimize one reward per run. The default trains motion quality only; visual
+# quality and text alignment are held-out diagnostics, avoiding an uncalibrated
+# scalar sum of heterogeneous VideoAlign heads.
+
+experiment:
+  seed: 42
+  run_name: wan_anyflow_vptd_videoalign_mq
+  output_dir: /runs/outputs/wan_anyflow_vptd_videoalign_mq
+  max_train_steps: 1200
+  save_every: 50
+  eval_every: 200
+  log_every: 1
+  resume:
+
+model:
+  model_id: nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers
+  anyflow_commit: d2acf7373a45173082ec47eb16553a373b10f856
+  flow_shift: 5.0
+  # K=4 stochastic policy transitions plus one deterministic final transition.
+  train_map_steps: 5
+  eval_map_steps: 4
+  guidance_scale: 1.0
+  num_frames: 81
+  height: 480
+  width: 832
+  fps: 16
+  max_sequence_length: 512
+  negative_prompt: >-
+    色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走
+
+lora:
+  rank: 256
+  alpha: 256
+  dropout: 0.0
+  target_modules:
+    - attn1.to_q
+    - attn1.to_k
+    - attn1.to_v
+    - attn1.to_out.0
+    - ffn.net.0.proj
+    - ffn.net.2
+
+optimizer:
+  learning_rate: 2.0e-6
+  betas: [0.0, 0.999]
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  ema_decay: 0.99
+  ema_warmup_steps: 200
+
+posterior_policy:
+  objective: posterior_distillation
+  stochastic_steps: 4
+  group_size: 4
+  target_ess_ratio: 0.50
+  # Used only by the direct Flow-Map GRPO ablation.
+  clip_range: 1.0e-4
+  advantage_clip: 5.0
+  advantage_epsilon: 1.0e-4
+  inner_epochs: 1
+
+reward:
+  backend: genrl
+  optimize: videoalign_mq
+  validation:
+    - videoalign_mq
+    - videoalign_vq
+    - videoalign_ta
+
+prompts:
+  dataset: microsoft/World-R1
+  subset: enhanced
+  split: train
+  text_field: prompt
+  # FastVideo's shared RL validation default is 16; log 8 qualitative cases,
+  # exceeding the requested minimum of five.
+  validation_count: 16
+  qualitative_count: 8
+
+wandb:
+  project: vptd_anyflow_wan
+  entity:
+  mode: online
