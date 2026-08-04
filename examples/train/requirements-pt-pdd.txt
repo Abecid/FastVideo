@@ -1,0 +1,19 @@
+# Extra runtime dependencies for the PT-PDD Modal experiment.
+#
+# Core FastVideo installs torch, diffusers>=0.38, transformers>=4.57.3,
+# accelerate, datasets, PEFT, W&B, OpenCV, and the FastVideo reward stack.
+# These additions are the intersection needed by the pinned AnyFlow source and
+# VideoAlign, without downgrading FastVideo's core model libraries.
+numpy==1.26.4
+einops==0.8.1
+ftfy>=6.3.1
+easydict>=1.13
+fire>=0.7.0
+prettytable==3.8.0
+pandas>=2.2.0
+matplotlib==3.10.3
+qwen-vl-utils==0.0.11
+safetensors>=0.5.3
+timm==1.0.15
+trl==0.8.6
+sentencepiece>=0.2.0
