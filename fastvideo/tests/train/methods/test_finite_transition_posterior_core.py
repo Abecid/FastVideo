@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from fastvideo.train.methods.rl.finite_transition_posterior_core import (
+from fastvideo.train.methods.rl.common.finite_transition import (
     append_data_endpoint,
     endpoint_anchor_parameters,
     gaussian_log_prob_mean,
@@ -58,7 +58,7 @@ def test_degenerate_reward_gives_exact_zero_projection_update() -> None:
         distributed_world_size=2,
     )
     loss.backward()
-    assert float(loss) == pytest.approx(0.0)
+    assert float(loss.detach()) == pytest.approx(0.0)
     assert torch.equal(log_prob.grad, torch.zeros_like(log_prob))
     assert float(diagnostics["score_coefficient_abs_mean_local"]) == 0.0
 
