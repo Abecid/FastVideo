@@ -83,6 +83,8 @@ training:
 ## RL Examples
 
 - DiffusionNFT Wan video RL: see `examples/train/diffusion_nft_wan_video.md`.
+- AnyFlow finite-transition posterior projection and matched Flow-Map-GRPO
+  experiment: see `examples/train/finite_transition_posterior_wan.md`.
 
 ## Directory Layout
 
