@@ -1,0 +1,139 @@
+# Finite-Transition Posterior Projection (FTPP) on released AnyFlow-Wan 1.3B.
+#
+# Scientific question:
+#   Given the same ASFMC counterfactual transition group used by Flow-Map GRPO,
+#   does direct forward-KL projection of the reward-tilted local posterior
+#   converge faster and preserve video motion/diversity better than clipped
+#   likelihood-ratio optimization?
+#
+# Run the matched baseline by overriding:
+#   --method.objective flowmap_grpo
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+    lora:
+      enable: true
+      rank: 256
+      alpha: 256
+      target_modules:
+        - to_q
+        - to_k
+        - to_v
+        - to_out
+        - ffn.fc_in
+        - ffn.fc_out
+
+method:
+  _target_: fastvideo.train.methods.rl.finite_transition_posterior.FiniteTransitionPosteriorMethod
+
+  # Primary contribution. ``flowmap_grpo`` is the matched update-rule ablation.
+  objective: posterior_projection
+
+  # Released AnyFlow / Flow-Map-GRPO operating point.
+  flow_shift: 5.0
+  train_map_steps: 5
+  eval_map_steps: 4
+  stochastic_steps: 4
+  group_size: 4
+  target_ess_ratio: 0.50
+  reward_bisection_steps: 40
+  clip_range: 0.0001
+  advantage_clip: 5.0
+  advantage_epsilon: 0.0001
+  attn_kind: dense
+  max_grad_norm: 1.0
+  post_update_probe_every: 10
+  terminal_progress: true
+
+  # Optimize one reward head; hold the others out as anti-reward-hacking checks.
+  reward_backend: genrl
+  optimize_reward: videoalign_mq
+  reward_fn:
+    rewards:
+      videoalign_mq: 1.0
+      videoalign_vq: 1.0
+      videoalign_ta: 1.0
+
+  validation:
+    every_steps: 100
+    num_steps: 4
+    num_prompts: 16
+    batch_size: 1
+    log_samples: true
+    max_samples: 8
+    fps: 16
+    seed: 42
+    data_path:
+
+  evaluation:
+    samples_per_prompt: 2
+    static_temporal_l1_threshold: 0.01
+    primary_min_delta: 0.02
+    significance_z: 1.96
+    min_motion_ratio: 0.90
+    min_latent_diversity_ratio: 0.80
+    heldout_max_drop:
+      videoalign_vq: 0.02
+      videoalign_ta: 0.02
+
+  ema:
+    enabled: true
+    decay: 0.99
+    update_after_step: 200
+    validation: true
+
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/finite_transition_posterior/train/combined_parquet_dataset
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 21
+    num_height: 480
+    num_width: 832
+    num_frames: 81
+
+  optimizer:
+    learning_rate: 2.0e-6
+    betas: [0.0, 0.999]
+    weight_decay: 0.0
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 1200
+    # The method owns exactly one on-policy update per outer step.
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: outputs/wan_anyflow_finite_transition_posterior
+    training_state_checkpointing_steps: 50
+    checkpoints_total_limit: 4
+    resume_from_checkpoint:
+
+  tracker:
+    project_name: finite-transition-posterior-wan
+    run_name: anyflow_wan_ftp_videoalign_mq
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+pipeline:
+  flow_shift: 5.0
+  dit_config:
+    r_embedder: true
+    r_embedder_fusion: gated
+    r_embedder_gate_value: 0.25
+    r_embedder_deltatime_type: r
