@@ -1,5 +1,9 @@
 # FTPP experiment context for coding agents
 
+For the latest implementation status, runtime-fix history, step-100 paired
+results, and open audit questions, read
+`examples/train/finite_transition_posterior_progress_report.md` first.
+
 Read this before changing or running the finite-transition posterior experiment.
 It explains the scientific question, the invariants that make the comparison
 valid, the expected tensor/data flow, and which W&B signals determine whether
