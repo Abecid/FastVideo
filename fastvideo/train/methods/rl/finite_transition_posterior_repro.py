@@ -150,8 +150,8 @@ class ReproducibleFiniteTransitionPosteriorMethod(
         )
         if not 0.0 < self._local_anchor_delta < 1.0:
             raise ValueError("method.local_anchor_delta must lie in (0, 1)")
-        if self._local_noise_scale < 0.0:
-            raise ValueError("method.local_noise_scale must be non-negative")
+        if self._local_noise_scale <= 0.0:
+            raise ValueError("method.local_noise_scale must be positive")
         if not 0.0 < self._local_terminal_base_sigma < 1.0:
             raise ValueError(
                 "method.local_terminal_base_sigma must lie in (0, 1)"
