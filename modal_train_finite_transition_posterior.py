@@ -261,6 +261,7 @@ def train(
             "-m",
             "pytest",
             "-q",
+            "fastvideo/tests/train/methods/test_anyflow_schedule.py",
             "fastvideo/tests/train/methods/test_finite_transition_posterior_core.py",
             "fastvideo/tests/train/methods/test_finite_transition_posterior_method.py",
             "fastvideo/tests/train/methods/test_finite_transition_posterior_repro.py",
