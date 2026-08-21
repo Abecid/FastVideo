@@ -56,6 +56,13 @@ def test_finite_transition_config_applies_anyflow_arch_overrides() -> None:
     assert arch.r_embedder_gate_value == pytest.approx(0.25)
     assert arch.r_embedder_deltatime_type == "r"
 
+    # Scientific FTPP must train the first three stochastic decisions on the
+    # exact four-step deployment grid, then deterministically finish 625 -> 0.
+    assert cfg.method["require_train_eval_schedule_match"] is True
+    assert cfg.method["train_map_steps"] == 4
+    assert cfg.method["eval_map_steps"] == 4
+    assert cfg.method["stochastic_steps"] == 3
+
 
 @pytest.mark.parametrize(
     ("target_time", "expected"),
