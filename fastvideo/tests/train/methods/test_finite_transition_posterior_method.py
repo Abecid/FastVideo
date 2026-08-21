@@ -10,6 +10,9 @@ import torch
 
 from fastvideo.pipelines import TrainingBatch
 import fastvideo.train.methods.rl.finite_transition_posterior as ftp
+from fastvideo.train.methods.rl.finite_transition_posterior_repro import (
+    ReproducibleFiniteTransitionPosteriorMethod,
+)
 
 
 class _NoopScheduler:
@@ -111,6 +114,10 @@ def _config(objective: str) -> SimpleNamespace:
         ),
         method={
             "objective": objective,
+            "anchor_type": "local",
+            "local_anchor_delta": 0.03,
+            "local_noise_scale": 0.7,
+            "local_terminal_base_sigma": 0.05,
             "train_map_steps": 2,
             "eval_map_steps": 1,
             "stochastic_steps": 1,
@@ -140,6 +147,7 @@ def _make_method(
     *,
     objective: str,
     equal_rewards: bool,
+    local_anchor: bool = False,
 ) -> tuple[ftp.FiniteTransitionPosteriorMethod, _FakeAnyFlowStudent]:
     def build_optimizer(params: list[torch.nn.Parameter], **kwargs: Any):
         del kwargs
@@ -161,7 +169,12 @@ def _make_method(
     )
 
     student = _FakeAnyFlowStudent()
-    method = ftp.FiniteTransitionPosteriorMethod(
+    method_cls = (
+        ReproducibleFiniteTransitionPosteriorMethod
+        if local_anchor
+        else ftp.FiniteTransitionPosteriorMethod
+    )
+    method = method_cls(
         cfg=_config(objective),
         role_models={"student": student},
     )
@@ -213,6 +226,26 @@ def test_finite_transition_method_updates_with_informative_reward(
     assert float(metrics["ftp/posterior_ess"]) >= 1.0
 
 
+def test_local_anchor_method_updates_and_logs_anchor_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    method, student = _make_method(
+        monkeypatch,
+        objective="posterior_projection",
+        equal_rewards=False,
+        local_anchor=True,
+    )
+    before = student.transformer.scale.detach().clone()
+    loss_map, _, metrics = method.managed_train_step(iter(()), 1)
+    after = student.transformer.scale.detach().clone()
+
+    assert torch.isfinite(loss_map["total_loss"])
+    assert not torch.equal(before, after)
+    assert float(metrics["ftp/anchor_is_local"]) == 1.0
+    assert float(metrics["ftp/local_anchor_timestep"]) == pytest.approx(470.0)
+    assert float(metrics["ftp/local_noise_scale"]) == pytest.approx(0.7)
+
+
 def test_posterior_projection_has_zero_update_for_equal_rewards(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -220,6 +253,7 @@ def test_posterior_projection_has_zero_update_for_equal_rewards(
         monkeypatch,
         objective="posterior_projection",
         equal_rewards=True,
+        local_anchor=True,
     )
     before = student.transformer.scale.detach().clone()
     loss_map, _, metrics = method.managed_train_step(iter(()), 1)
