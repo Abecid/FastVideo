@@ -1,0 +1,8 @@
+name: fastvideo-ftpp-modal
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - modal>=1.0,<2.0
