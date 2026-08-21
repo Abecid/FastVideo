@@ -5,8 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from fastvideo.train.methods.rl.finite_transition_posterior_repro import (
+    _BASELINE_BUFFER_BYTES,
     _FiniteTransitionRunState,
 )
 
@@ -22,6 +24,12 @@ def test_run_state_round_trip_preserves_scientific_baseline() -> None:
         _cumulative_train_seconds=1234.5,
     )
     state = _FiniteTransitionRunState(source).state_dict()
+
+    assert state["validation_baseline_json"].dtype == torch.uint8
+    assert state["validation_baseline_json"].shape == (
+        _BASELINE_BUFFER_BYTES,
+    )
+    assert int(state["validation_baseline_length"]) > 0
 
     target = SimpleNamespace(
         _validation_baseline={},
