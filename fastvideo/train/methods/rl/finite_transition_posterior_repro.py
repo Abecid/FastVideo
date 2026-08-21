@@ -196,34 +196,28 @@ class ReproducibleFiniteTransitionPosteriorMethod(
                 f"{float(target_time)}, delta={delta_absolute}"
             )
 
-        # AnyFlow can query arbitrary time pairs, so move a short additional
-        # interval toward data. This is the local anchor recommended for
-        # two-time maps, rather than re-predicting the full clean endpoint.
-        anchor_state, _ = self._flow_map(
-            deterministic_target,
-            target_time,
-            anchor_time,
-            batch,
-        )
-
-        batch_size = int(anchor_state.shape[0])
-        anchor_batch = anchor_time.reshape(1).to(
-            device=anchor_state.device,
+        # The closed-form local conditional is evaluated at x_r. AnyFlow's
+        # instantaneous reverse velocity is obtained by setting both time
+        # arguments to r. The conceptual anchor time tau=r+delta in the paper
+        # corresponds to q_tau=q_r-delta in AnyFlow's reverse convention.
+        batch_size = int(deterministic_target.shape[0])
+        target_batch = target_time.reshape(1).to(
+            device=deterministic_target.device,
             dtype=torch.float32,
         ).expand(batch_size)
-        batch.timesteps = anchor_batch
+        batch.timesteps = target_batch
         instantaneous_reverse_velocity = self.student.predict_velocity_with_r(
-            anchor_state,
-            anchor_batch,
-            anchor_batch,
+            deterministic_target,
+            target_batch,
+            target_batch,
             batch,
             conditional=True,
             attn_kind=self._attn_kind,  # type: ignore[arg-type]
         )
         mean, std = local_anchor_gaussian_parameters(
-            anchor_state,
+            deterministic_target,
             instantaneous_reverse_velocity,
-            anchor_batch,
+            target_batch,
             num_train_timesteps=self.student.num_train_timesteps,
             delta_fraction=self._local_anchor_delta,
             noise_scale=self._local_noise_scale,
