@@ -12,11 +12,11 @@ from fastvideo.train.methods.rl.common.local_asfmc import (
 )
 
 
-def test_local_anchor_matches_euler_maruyama_formula() -> None:
-    anchor = torch.full((2, 3), 2.0)
-    reverse_velocity = torch.full_like(anchor, 0.5)
+def test_local_anchor_matches_flowmap_grpo_formula() -> None:
+    target = torch.full((2, 3), 2.0)
+    reverse_velocity = torch.full_like(target, 0.5)
     mean, std = local_anchor_gaussian_parameters(
-        anchor,
+        target,
         reverse_velocity,
         torch.tensor([750.0, 750.0]),
         num_train_timesteps=1000,
@@ -27,10 +27,8 @@ def test_local_anchor_matches_euler_maruyama_formula() -> None:
 
     paper_time = 0.25
     lambda_sq = 0.7**2
-    expected_mean = (
-        2.0
-        + 0.03 * (1.0 - lambda_sq) * 0.5
-        - 0.03 * lambda_sq * 2.0 / paper_time
+    expected_mean = 2.0 - 0.03 * lambda_sq * (
+        2.0 / paper_time + 0.5
     )
     expected_std = (
         0.7
@@ -43,10 +41,10 @@ def test_local_anchor_matches_euler_maruyama_formula() -> None:
 
 
 def test_local_anchor_is_differentiable_through_policy_mean() -> None:
-    anchor = torch.tensor([[1.5]], requires_grad=True)
+    target = torch.tensor([[1.5]], requires_grad=True)
     reverse_velocity = torch.tensor([[0.2]], requires_grad=True)
     mean, std = local_anchor_gaussian_parameters(
-        anchor,
+        target,
         reverse_velocity,
         600.0,
         num_train_timesteps=1000,
@@ -55,17 +53,17 @@ def test_local_anchor_is_differentiable_through_policy_mean() -> None:
         terminal_base_sigma=0.05,
     )
     (mean.sum() + 0.0 * std.sum()).backward()
-    assert anchor.grad is not None
+    assert target.grad is not None
     assert reverse_velocity.grad is not None
-    assert torch.isfinite(anchor.grad).all()
+    assert torch.isfinite(target.grad).all()
     assert torch.isfinite(reverse_velocity.grad).all()
 
 
-def test_terminal_base_sigma_stabilizes_near_noise_anchor() -> None:
-    anchor = torch.ones((1, 2))
-    velocity = torch.zeros_like(anchor)
+def test_terminal_base_sigma_stabilizes_near_noise_target() -> None:
+    target = torch.ones((1, 2))
+    velocity = torch.zeros_like(target)
     mean, std = local_anchor_gaussian_parameters(
-        anchor,
+        target,
         velocity,
         999.0,
         num_train_timesteps=1000,
