@@ -1,208 +1,237 @@
 # Finite-Transition Posterior Projection for AnyFlow-Wan
 
-This experiment tests one narrow hypothesis:
+This branch tests one narrow hypothesis:
 
-> Once ASFMC has converted a deterministic few-step flow map into a valid
-> stochastic local policy, directly fitting the KL-regularized reward posterior
-> should be more sample-efficient and less destructive than a clipped
-> likelihood-ratio update.
+> Once a deterministic AnyFlow transition has been converted into a valid local
+> stochastic policy, directly fitting its reward-tilted posterior should use the
+> expensive video rollouts more efficiently than a matched GRPO score-function
+> update.
 
-The rollout is held fixed between the proposed method and the baseline. The only
-scientific delta is the update rule.
+The rollout, model, prompts, rewards, optimizer and validation are identical
+between the proposed method and the baseline. The scientific delta is the
+update rule.
 
-## Method
+## Why local-anchor ASFMC
 
-A released four-step AnyFlow-Wan model defines finite transitions
+AnyFlow is a two-time flow map. Its network predicts a finite average velocity
+`u_theta(x_t, t, r, c)` and executes
 
 ```text
 x_r = x_t - ((t-r)/N) u_theta(x_t, t, r, c).
 ```
 
-At each optimizer step:
+That map is deterministic, so it does not directly define a stochastic policy
+or action likelihood. Flow-Map GRPO introduces Anchored Stochastic Flow Map
+Composition (ASFMC) to solve this without pretending that an arbitrary Gaussian
+perturbation of a long-range map is path preserving.
 
-1. Select one of four trainable finite transitions.
-2. Generate one deterministic shared prefix for a single prompt.
-3. Use endpoint-anchored ASFMC to sample four valid candidate next states from
-   that exact shared state.
-4. Complete each branch deterministically and score the resulting video.
-5. Form the local KL-regularized policy-improvement posterior
+For two-time maps, the paper recommends a **local anchor**. After the long map
+`t -> r`, the model moves a short additional interval `r -> tau` toward data,
+with
 
-   ```text
-   q_R(a|s) proportional to q_old(a|s) exp(R(a)/tau).
-   ```
+```text
+tau = r + delta
+```
 
-   The temperature is solved so that posterior ESS is half the branch group.
-6. Project this posterior into the current LoRA policy with
+in the paper's noise-to-data convention. FastVideo/AnyFlow uses the reverse
+coordinate, so the implementation subtracts the same normalized interval from
+the absolute reverse timestep.
 
-   ```text
-   L = - sum_j (w_j - 1/G) log pi_theta(a_j|s).
-   ```
+At the local anchor, the method evaluates the instantaneous velocity and uses
+the short reverse-SDE Euler-Maruyama Gaussian. The defaults follow the released
+Flow-Map-GRPO two-time setting:
 
-The `1/G` behavior-score baseline gives an exactly zero update when the reward
-cannot distinguish the branches. Only one inner epoch is used, keeping the
-control-variate argument on-policy.
+```yaml
+anchor_type: local
+local_anchor_delta: 0.03
+local_noise_scale: 0.7
+local_terminal_base_sigma: 0.05
+```
+
+The local conditional has approximation error of order
+`O(delta^(3/2))`; importantly, it does not approximate an entire long-range SDE
+transition as one Gaussian. `anchor_type: endpoint` remains available as an
+ablation, but it injects stronger randomness and relies on an accurate long
+map to the clean endpoint, which is less natural for a general two-time model.
+
+## One training update
+
+A released four-step AnyFlow-Wan checkpoint is evaluated deterministically. For
+training, the schedule contains four stochastic branchable transitions and one
+final deterministic completion.
+
+At every optimizer step:
+
+1. Select one branchable finite transition.
+2. Sample one prompt and one initial Gaussian latent.
+3. Run one deterministic shared prefix on all four GPUs.
+4. Use local-anchor ASFMC to sample one candidate next latent per GPU from the
+   same current state.
+5. Complete each candidate with the same deterministic AnyFlow suffix.
+6. Decode the four 81-frame videos and score all VideoAlign heads.
+7. Use MQ as the optimized reward; retain VQ and TA as held-out diagnostics.
+8. Convert the four MQ rewards into an ESS-controlled Boltzmann posterior.
+9. Update the LoRA policy with either posterior projection or the matched GRPO
+   loss.
+
+With four GPUs and group size four, the global conceptual action tensor is
+
+```text
+[4, 21, 16, 60, 104]
+```
+
+for 81-frame, 480x832 Wan video latents. Each GPU physically owns one
+`[1, 21, 16, 60, 104]` branch.
+
+## Proposed update
+
+The current stochastic transition policy is `q_old(a|s)`. Completing action
+`a` gives a terminal reward `R(a)`. The KL-regularized locally improved policy
+is
+
+```text
+q_R(a|s) proportional to q_old(a|s) exp(R(a)/tau).
+```
+
+Because the candidates were sampled from `q_old`, the finite-group posterior
+weights are simply
+
+```text
+w_j = softmax(R_j / tau).
+```
+
+`tau` is solved per group so that the effective sample size
+
+```text
+ESS = 1 / sum_j w_j^2
+```
+
+is half of the four-candidate group by default. This makes selection strength
+comparable across reward scales.
+
+The proposed centered forward-KL projection is
+
+```text
+L = -sum_j (w_j - 1/G) log pi_theta(a_j|s).
+```
+
+Subtracting `1/G` is a behavior-score control variate. If every branch receives
+the same reward, `w_j = 1/G` and the update is exactly zero rather than a random
+finite-sample behavior-cloning drift.
 
 ## Matched baseline
 
-Set:
+Set
 
 ```yaml
 method:
   objective: flowmap_grpo
 ```
 
-The baseline uses the same:
+The baseline uses the same prompt, source noise, prefix, local-ASFMC actions,
+completed videos, rewards, LoRA, optimizer and held-out seeds. Only the loss
+changes to clipped likelihood-ratio GRPO.
 
-- AnyFlow checkpoint and four-step deterministic evaluation;
-- shared prompt, initial noise and prefix;
-- ASFMC candidate actions;
-- branch completions and reward calls;
-- optimizer, LoRA, prompts and validation seeds.
-
-Only the loss changes to clipped Flow-Map GRPO. With one on-policy update per
-candidate group, the initial likelihood ratio is one, so the sharpest
-interpretation is a comparison between group-normalized linear advantage
-weighting and ESS-controlled Boltzmann posterior weighting. It is not a blanket
-claim that forward KL dominates every possible multi-epoch PPO implementation.
-
-## Why this is a useful open question
-
-Flow-Map GRPO establishes that ASFMC makes few-step flow maps amenable to online
-RL. AWM and RAM independently show that diffusion alignment becomes dramatically
-more efficient when it is returned to matching/regression geometry rather than
-high-variance trajectory PPO. The unresolved question is whether a deterministic
-finite flow map should be optimized through likelihood ratios at all once its
-local reward-improved posterior is available explicitly.
-
-This experiment is intentionally not a stack of new components. ASFMC and
-shared-prefix branching are the controlled rollout substrate. The proposed
-single delta is:
+The current experiment performs one on-policy update per candidate group. At
+that first gradient evaluation the policy ratio is one, so the sharpest
+interpretation is:
 
 ```text
-clipped policy-gradient update
-        ->
-direct local posterior projection.
+group-normalized linear advantage weighting
+versus
+ESS-controlled Boltzmann posterior weighting.
 ```
 
-## Reproducibility and fail-fast checks
+It is not a blanket claim that forward KL dominates every multi-epoch PPO
+variant.
 
-The branch includes all experiment plumbing:
+## Evaluation
 
-- released `nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers` model loading;
-- deterministic train/held-out prompt splitting and text-only preprocessing;
-- VideoAlign checkpoint download and runtime preflight;
-- FastVideo config/model-contract validation;
-- LoRA, HSDP, checkpoint and EMA configuration;
-- fixed-seed held-out evaluation and W&B video logging;
-- periodic Modal volume commits while `torchrun` is active;
-- resume-safe persistence of the step-zero validation baseline, best reward
-  delta, target-reaching step and cumulative training time.
-
-The Modal image compiles the new modules and runs the CPU math and fake-model
-regression tests before an H100 container can start. A syntax/import/unit-test
-failure therefore stops during image construction rather than after expensive
-GPU allocation.
-
-## Evaluation protocol
-
-The preparation script creates a deterministic disjoint train/validation split.
-Validation always uses fixed prompts, fixed seeds, EMA weights and deterministic
+The preparation script creates a deterministic disjoint train/validation prompt
+split. Validation uses fixed prompts, fixed seeds, EMA weights and deterministic
 four-step AnyFlow inference.
 
-The default run optimizes VideoAlign motion quality (`videoalign_mq`) and treats
-visual quality and text alignment as held-out anti-reward-hacking metrics.
+Every training step logs to W&B:
 
-Every training step logs:
-
-- optimized and held-out branch reward means/stds;
-- reward selection gain from posterior reweighting;
+- optimized and held-out reward means and standard deviations;
+- reward selection gain;
 - posterior ESS, temperature, entropy and maximum weight;
-- branch timestep and ASFMC posterior standard deviation;
-- action distance from the deterministic map and posterior mean;
-- branch-video temporal L1;
+- selected transition and local anchor timestep;
+- local ASFMC noise scale and action displacement;
+- temporal L1 motion;
 - gradient norm;
-- periodic post-update approximate KL and log-probability displacement;
-- step time and cumulative GPU-hours.
+- periodic post-update approximate KL and log-probability shift;
+- wall time and cumulative GPU-hours.
 
-Every validation logs per-prompt means, standard deviations and standard errors
-for:
+Every validation logs:
 
-- all reward heads;
-- adjacent-frame temporal L1;
-- static-video ratio;
-- latent pairwise diversity across fixed seeds;
-- decoded-video pairwise diversity;
-- qualitative W&B videos with prompt and metrics.
+- mean, standard deviation and standard error for all reward heads;
+- delta from the untouched step-zero model;
+- adjacent-frame temporal L1 and static-video rate;
+- pairwise latent and decoded-video diversity across fixed seeds;
+- fixed qualitative videos with prompt and reward captions;
+- primary reward gain per update and per GPU-hour.
 
-It also logs every metric's delta from the untouched step-zero checkpoint.
-Paired Modal launches share a `WANDB_RUN_GROUP`, while `WANDB_JOB_TYPE`
-distinguishes `posterior_projection` from `flowmap_grpo`.
+A scientific run counts as successful only when held-out MQ improves by the
+configured absolute and 95%-standard-error margins while VQ/TA, motion and
+latent diversity stay within their retention thresholds. W&B logs this gate as
+`validation_success/all`. The efficiency claim requires comparing the paired
+reward-versus-step and reward-versus-GPU-hour curves.
 
-## What counts as success
+## Reproducibility and fail-fast behavior
 
-A smoke test only proves engineering correctness. A scientific run is considered
-successful only if all of the following hold on the held-out prompt set:
+The branch includes:
 
-1. **Primary improvement:** motion reward increases by at least the configured
-   absolute margin and exceeds the combined 95% standard-error margin.
-2. **No reward tradeoff:** held-out VQ and TA do not fall by more than their
-   configured tolerances.
-3. **No static collapse:** temporal L1 remains at least 90% of the step-zero
-   baseline.
-4. **No diversity collapse:** latent pairwise diversity remains at least 80% of
-   baseline.
-5. **Efficiency win:** posterior projection either reaches the matched GRPO
-   baseline's best held-out reward in fewer updates/GPU-hours or achieves a
-   higher reward-vs-GPU-hour area under the curve.
+- released AnyFlow checkpoint contract validation and full snapshot caching;
+- deterministic World-R1 train/held-out splitting;
+- text-only parquet preprocessing;
+- VideoAlign checkpoint download and runtime preflight;
+- LoRA, HSDP, checkpoint and EMA configuration;
+- resume-safe persistence of the original validation baseline, best reward
+  delta, target-reaching step and cumulative training time;
+- periodic Modal volume commits while `torchrun` is active;
+- CPU math tests and fake-model end-to-end tests executed during Modal image
+  construction before H100 allocation.
 
-The W&B boolean `validation_success/all` encodes the first four gates. The fifth
-is assessed by comparing the paired W&B curves.
-
-## One-time launcher setup on macOS
+## One-time setup on macOS
 
 The local Conda environment contains only the Modal client. CUDA, PyTorch,
-FlashAttention, FastVideo, reward libraries and all training dependencies are
-built inside the reproducible Modal image.
+FlashAttention, FastVideo and reward dependencies are built inside Modal.
 
 ```bash
 git switch adam/finite-transition-alignment
 git pull
-
 conda env create -f environment.ftpp-modal.yml
 conda activate fastvideo-ftpp-modal
 modal setup
 ```
 
-The launcher expects these existing Modal resources:
+Required Modal resources:
 
 ```text
-Secrets:  wandb-adamlee00, hf-adamlee00
-Volumes:  fastvideo-data, fastvideo-runs, fastvideo-cache
+Secrets: wandb-adamlee00, hf-adamlee00
+Volumes: fastvideo-data, fastvideo-runs, fastvideo-cache
 ```
 
-The W&B secret must expose `WANDB_API_KEY`. The Hugging Face checkpoint and
-World-R1 dataset are public, but the HF secret is mounted for authenticated,
-rate-limit-safe downloads.
+`wandb-adamlee00` must expose `WANDB_API_KEY`.
 
-## Modal smoke test
-
-Run this first after pulling a new revision:
+## Smoke test
 
 ```bash
 modal run modal_train_finite_transition_posterior.py --smoke
 ```
 
-This uses 17 frames, a smaller spatial shape, two updates and validation every
-step. It verifies the real distributed model/reward/tracker path but must not be
-compared with scientific runs.
+This uses 17 frames, reduced spatial resolution, two updates and validation at
+every update. It verifies the real distributed model, reward and W&B path but
+is not a scientific result.
 
-To smoke-test both update rules against the exact same cached split:
+To smoke-test both update rules on the same cached split:
 
 ```bash
 modal run modal_train_finite_transition_posterior.py --smoke --paired
 ```
 
-## Recommended scientific experiment
+## Recommended experiment
 
 ```bash
 modal run modal_train_finite_transition_posterior.py \
@@ -210,22 +239,10 @@ modal run modal_train_finite_transition_posterior.py \
   --max-train-steps 1200
 ```
 
-The launcher first materializes and commits the deterministic split once, then
-starts posterior-projection and Flow-Map-GRPO jobs against the same cached
-parquets and scientific settings. Both runs appear in one W&B group.
-
-A single proposed-method run is also supported:
-
-```bash
-modal run modal_train_finite_transition_posterior.py \
-  --objective posterior_projection \
-  --max-train-steps 1200
-```
+The launcher prepares and commits the deterministic split first, then starts the
+posterior-projection and matched-GRPO jobs in one W&B run group.
 
 ## Resume an interrupted single run
-
-Use the same run name so the output directory is reused, and ask FastVideo to
-resolve the latest checkpoint:
 
 ```bash
 modal run modal_train_finite_transition_posterior.py \
@@ -234,31 +251,5 @@ modal run modal_train_finite_transition_posterior.py \
   --resume-from-checkpoint latest
 ```
 
-The launcher commits the run and cache volumes every ten minutes by default, as
-well as on normal or failed subprocess exit.
-
-## Manual local preparation
-
-For debugging outside Modal, run the module form so repository-relative imports
-are deterministic:
-
-```bash
-python -m examples.train.check_finite_transition_posterior_environment \
-  --require-wandb \
-  --json
-
-python -m examples.train.prepare_finite_transition_posterior_assets \
-  --check-rewards \
-  --objective posterior_projection \
-  --dataset world-r1-enhanced-dynamic \
-  --reward videoalign_mq \
-  --max-train-prompts 512 \
-  --validation-prompts 64 \
-  --json
-```
-
-Then run the generated config printed by the preparation script:
-
-```bash
-bash examples/train/run.sh outputs/ftp_configs/<generated-config>.yaml
-```
+The launcher commits run/cache volumes every ten minutes by default and again
+on normal or failed process exit.
