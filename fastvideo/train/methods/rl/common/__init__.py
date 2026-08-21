@@ -15,6 +15,9 @@ from fastvideo.train.methods.rl.common.finite_transition import (
     temporal_l1,
     validate_training_schedule,
 )
+from fastvideo.train.methods.rl.common.local_asfmc import (
+    local_anchor_gaussian_parameters,
+)
 from fastvideo.train.methods.rl.common.sampling import (
     DiffusionSampler,
     SamplingConfig,
@@ -44,6 +47,7 @@ __all__ = [
     "endpoint_anchor_parameters",
     "gaussian_log_prob_mean",
     "group_advantages",
+    "local_anchor_gaussian_parameters",
     "mean_pairwise_rms",
     "media_to_video_array",
     "posterior_projection_loss",
