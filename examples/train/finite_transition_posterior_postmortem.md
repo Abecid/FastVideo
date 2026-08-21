@@ -2,14 +2,15 @@
 
 This note reviews the first paired FTPP/GRPO run described in
 `finite_transition_posterior_progress_report.md`. It records the implementation
-bug found after that run, what can and cannot be concluded from the results, and
-the minimum corrected experiment needed before judging the method.
+bugs found after that run, what can and cannot be concluded from the results,
+and the minimum corrected experiment needed before judging the method.
 
 ## Executive conclusion
 
 The first run does **not** establish an FTPP win, but it also should not be used
 to reject the attack vector. The run sampled and evaluated AnyFlow with the
-wrong timestep grid.
+wrong timestep grid, and its five-step training transitions did not match the
+four-step deterministic transitions used for evaluation.
 
 The executed method reused FastVideo's generic
 `FlowMatchEulerDiscreteScheduler`. That scheduler starts from a non-zero
@@ -29,22 +30,32 @@ executed: [1000, 909.707, 717.317, 24.414, 0]
 released: [1000, 937.500, 833.333, 625.000, 0]
 ```
 
-The five-step training grids were:
+The five-step grid used by the old training run was:
 
 ```text
 executed: [1000, 937.889, 834.712, 629.634, 24.414, 0]
-released: [1000, 952.381, 882.353, 769.231, 555.556, 0]
 ```
 
 This is not a cosmetic difference. The executed grid moved nearly the whole
 late transport into a transition ending at `q ~= 0.024`, then left an almost
 empty final transition. It also forced local-ASFMC delta clipping on one quarter
-of updates. The released AnyFlow grid has no such near-zero branch.
+of updates.
 
-The branch now overrides schedule construction in
-`ReproducibleFiniteTransitionPosteriorMethod` and locks the released values in
-CPU tests. Do not resume the old run into the corrected implementation: the
-rollout distribution and validation baseline changed. Start a new W&B group.
+There was a second mismatch: the model was optimized at five-step pairs but
+judged at four-step pairs. Because AnyFlow explicitly conditions on both source
+and target time, that asks the update to generalize across transition pairs
+rather than directly improving the deployed map.
+
+The branch now:
+
+1. reproduces the released AnyFlow schedule exactly;
+2. trains on the same four-step grid used for deterministic evaluation;
+3. branches only on the first three positive-target transitions;
+4. uses `625 -> 0` only to complete each candidate for reward; and
+5. rejects off-deployment train/eval grid mismatches in the scientific method.
+
+Do not resume the old run into the corrected implementation. The rollout
+distribution and step-zero validation baseline changed. Start a fresh W&B group.
 
 ## What the first run actually showed
 
@@ -67,9 +78,9 @@ The defensible statement is only:
 
 > The distributed local-ASFMC/reward/optimization pipeline ran stably for 100
 > updates without motion or diversity collapse, but neither update rule showed
-> held-out reward improvement on the mis-scheduled AnyFlow rollout.
+> held-out reward improvement on the mis-scheduled, off-deployment rollout.
 
-## Why step 100 was inconclusive even without the scheduler bug
+## Why step 100 was inconclusive even without the schedule bugs
 
 One update uses one prompt and four candidate videos. Therefore 100 updates are
 only 100 prompt groups and 400 reward-labeled videos. That is enough to expose a
@@ -127,30 +138,39 @@ That is useful as a hard per-state trust region, but it is not the same as a
 fixed-temperature KL-regularized posterior. It can turn weak or noisy local
 rankings into constant-magnitude random updates.
 
-Do not change this in the first corrected scheduler rerun; otherwise the effect
-of the scheduler repair cannot be isolated. If the corrected run is still flat,
-the next ablation should replace per-group fixed ESS with a slowly adapted
-global reward scale/temperature that allows nearly uniform weights and nearly
-zero updates on flat groups.
+Do not change this in the first corrected-grid rerun; otherwise the schedule
+repair cannot be isolated. If the corrected run is still flat, the next
+ablation should replace per-group fixed ESS with a slowly adapted global reward
+scale/temperature that allows nearly uniform weights and nearly zero updates on
+flat groups.
 
 ## Corrected experiment sequence
 
 ### 1. Real smoke test
 
-Run both objectives with the corrected branch and verify the W&B source/target
-timesteps. Expected five-step training nodes are approximately:
-
-```text
-1000, 952.381, 882.353, 769.231, 555.556, 0
-```
-
-Expected deterministic four-step validation nodes are approximately:
+Run both objectives with the corrected branch. Training and deterministic
+validation should now use the same released four-step nodes:
 
 ```text
 1000, 937.500, 833.333, 625.000, 0
 ```
 
-`ftp/local_anchor_delta_was_clipped` should remain zero on every branch.
+Only the first three transitions are branchable. The final `625 -> 0` map
+completes the candidate for reward. Verify:
+
+```text
+ftp/schedule_is_official_anyflow = 1
+ftp/train_eval_schedule_match_required = 1
+ftp/local_anchor_delta_was_clipped = 0
+```
+
+and confirm the observed source/target pairs are only:
+
+```text
+1000 -> 937.500
+937.500 -> 833.333
+833.333 -> 625.000
+```
 
 ### 2. New 200-step paired run
 
@@ -210,11 +230,13 @@ auxiliary stochastic policy. It is the more meaningful PT-PDD-style follow-up.
 ## Source-of-truth implementation files
 
 ```text
+examples/train/configs/rl/wan/finite_transition_posterior_anyflow_videoalign.yaml
 fastvideo/train/methods/rl/common/anyflow_schedule.py
 fastvideo/train/methods/rl/common/local_asfmc.py
 fastvideo/train/methods/rl/finite_transition_posterior.py
 fastvideo/train/methods/rl/finite_transition_posterior_repro.py
 fastvideo/tests/train/methods/test_anyflow_schedule.py
 fastvideo/tests/train/methods/test_finite_transition_posterior_core.py
+fastvideo/tests/train/methods/test_finite_transition_posterior_repro.py
 examples/train/finite_transition_posterior_progress_report.md
 ```
