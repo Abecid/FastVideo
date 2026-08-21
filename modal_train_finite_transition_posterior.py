@@ -6,15 +6,18 @@ The scientific comparison changes only ``method.objective``:
 - ``flowmap_grpo``: matched clipped likelihood-ratio baseline.
 
 Both runs use the same held-out prompt split, ASFMC branches, rewards, optimizer,
-validation seeds, and deterministic 4-step AnyFlow inference.
+validation seeds, and deterministic four-step AnyFlow inference.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import modal
 
 app = modal.App("fastvideo-finite-transition-posterior")
 
+LOCAL_REPO_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = "/root/FastVideo"
 CONFIG_PATH = (
     "examples/train/configs/rl/wan/"
@@ -67,7 +70,7 @@ image = (
     )
     .pip_install("uv")
     .add_local_dir(
-        ".",
+        str(LOCAL_REPO_ROOT),
         PROJECT_ROOT,
         copy=True,
         ignore=CONTEXT_IGNORE,
@@ -81,7 +84,24 @@ image = (
         "flash_attn-2.8.3+cu130torch2.12-cp312-cp312-linux_x86_64.whl",
         "uv pip check --system",
         "python -c 'import torch, flash_attn; "
+        "assert torch.__version__.split(\"+\")[0] == \"2.12.0\"; "
+        "assert torch.version.cuda == \"13.0\"; "
         "print(torch.__version__, torch.version.cuda, flash_attn.__version__)'",
+        "cd /root/FastVideo && python -m compileall -q "
+        "fastvideo/train/methods/rl/finite_transition_posterior.py "
+        "fastvideo/train/methods/rl/finite_transition_posterior_repro.py "
+        "fastvideo/train/methods/rl/common/finite_transition.py "
+        "examples/train/prepare_finite_transition_posterior_assets.py "
+        "examples/train/check_finite_transition_posterior_environment.py "
+        "modal_train_finite_transition_posterior.py",
+        "cd /root/FastVideo && pytest -q "
+        "fastvideo/tests/train/methods/test_finite_transition_posterior_core.py "
+        "fastvideo/tests/train/methods/test_finite_transition_posterior_method.py "
+        "fastvideo/tests/train/methods/test_finite_transition_posterior_repro.py",
+        "cd /root/FastVideo && python -m "
+        "examples.train.prepare_finite_transition_posterior_assets --help >/dev/null",
+        "cd /root/FastVideo && python -m "
+        "examples.train.check_finite_transition_posterior_environment --help >/dev/null",
         "cd /root/FastVideo && python -c '"
         "from fastvideo.train.methods.rl.rewards.hpsv3 import "
         "_patch_hpsv3_state_dict_loader, _patch_transformers_video_input_alias; "
@@ -95,6 +115,7 @@ image = (
         {
             "WANDB_MODE": "online",
             "WANDB_ENTITY": "adamlee00",
+            "WANDB__SERVICE_WAIT": "300",
             "TOKENIZERS_PARALLELISM": "false",
             "NUM_GPUS": str(NUM_GPUS),
             "HF_HOME": f"{MODAL_CACHE_ROOT}/huggingface",
@@ -144,12 +165,17 @@ def train(
     height: int = 480,
     width: int = 832,
     seed: int = 42,
+    comparison_id: str = "",
+    run_name_override: str = "",
+    resume_from_checkpoint: str = "",
+    volume_commit_interval_seconds: int = 600,
     smoke: bool = False,
     prepare_only: bool = False,
     skip_preprocess: bool = False,
 ) -> dict[str, str | int | float | bool]:
     from datetime import datetime, timezone
     import json
+    import os
     from pathlib import Path
     import subprocess
     import sys
@@ -160,6 +186,8 @@ def train(
         )
     if group_size % NUM_GPUS != 0:
         raise ValueError("group_size must be divisible by the four Modal GPUs")
+    if volume_commit_interval_seconds <= 0:
+        raise ValueError("volume_commit_interval_seconds must be positive")
     if smoke:
         max_train_steps = 2
         validation_prompts = min(validation_prompts, 8)
@@ -171,15 +199,28 @@ def train(
         height = 256
         width = 448
         max_train_prompts = "32"
+        volume_commit_interval_seconds = min(
+            volume_commit_interval_seconds,
+            60,
+        )
 
     repo = Path(PROJECT_ROOT)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    run_name = (
+    comparison_id = comparison_id.strip() or f"ftpp_s{seed}_{timestamp}"
+    run_name = run_name_override.strip() or (
         f"anyflow_ftp_{objective}_{reward}_"
-        f"f{num_frames}_{timestamp}"
+        f"f{num_frames}_s{seed}_{timestamp}"
     )
     output_dir = f"{OUTPUT_ROOT}/{run_name}"
     run_config_dir = f"{PROJECT_ROOT}/outputs/ftp_run_configs/{run_name}"
+
+    os.environ["WANDB_RUN_GROUP"] = comparison_id
+    os.environ["WANDB_JOB_TYPE"] = objective
+    os.environ["WANDB_TAGS"] = (
+        f"ftpp,anyflow,videoalign,{objective},seed-{seed}"
+    )
+    if resume_from_checkpoint:
+        os.environ["WANDB_RESUME"] = "allow"
 
     subprocess.run(["nvidia-smi"], check=True)
     subprocess.run(
@@ -193,9 +234,39 @@ def train(
         check=True,
     )
 
+    preflight_cmd = [
+        sys.executable,
+        "-m",
+        "examples.train.check_finite_transition_posterior_environment",
+        "--repo-root",
+        str(repo),
+        "--config",
+        CONFIG_PATH,
+        "--model-id",
+        "nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers",
+        "--dataset",
+        dataset,
+        "--diffusion-nft-root",
+        DIFFUSION_NFT_ROOT,
+        "--validation-prompts",
+        str(validation_prompts),
+        "--num-gpus",
+        str(NUM_GPUS),
+        "--require-wandb",
+        "--json",
+    ]
+    subprocess.run(
+        preflight_cmd,
+        cwd=repo,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        check=True,
+    )
+
     prep_cmd = [
         sys.executable,
-        "examples/train/prepare_finite_transition_posterior_assets.py",
+        "-m",
+        "examples.train.prepare_finite_transition_posterior_assets",
         "--repo-root",
         str(repo),
         "--config",
@@ -273,9 +344,11 @@ def train(
     summary = json.loads(completed.stdout.strip().splitlines()[-1])
     data_volume.commit()
     cache_volume.commit()
+    runs_volume.commit()
 
     result: dict[str, str | int | float | bool] = {
         "objective": objective,
+        "comparison_id": comparison_id,
         "run_name": run_name,
         "output_dir": output_dir,
         "run_config": str(summary["run_config"]),
@@ -288,24 +361,62 @@ def train(
         "target_ess_ratio": target_ess_ratio,
         "smoke": smoke,
         "prepare_only": prepare_only,
+        "resume_from_checkpoint": resume_from_checkpoint,
     }
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    (output_path / "modal_launch_manifest.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    runs_volume.commit()
+
     if prepare_only:
         print(json.dumps(result, indent=2, sort_keys=True), flush=True)
         return result
 
-    subprocess.run(
-        [
-            "bash",
-            "examples/train/run.sh",
-            str(summary["run_config"]),
-        ],
+    train_cmd = [
+        "bash",
+        "examples/train/run.sh",
+        str(summary["run_config"]),
+    ]
+    if resume_from_checkpoint:
+        train_cmd.extend(
+            [
+                "--training.checkpoint.resume_from_checkpoint",
+                resume_from_checkpoint,
+            ]
+        )
+
+    process = subprocess.Popen(
+        train_cmd,
         cwd=repo,
         stdout=sys.stdout,
         stderr=sys.stderr,
-        check=True,
     )
-    runs_volume.commit()
-    cache_volume.commit()
+    try:
+        while True:
+            try:
+                return_code = process.wait(
+                    timeout=int(volume_commit_interval_seconds)
+                )
+                break
+            except subprocess.TimeoutExpired:
+                runs_volume.commit()
+                cache_volume.commit()
+                print(
+                    "Committed Modal run/cache volumes while training is active.",
+                    flush=True,
+                )
+    finally:
+        # Preserve the newest checkpoint and logs even when torchrun exits with
+        # an error or the job approaches its timeout.
+        runs_volume.commit()
+        cache_volume.commit()
+
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, train_cmd)
+
     print(json.dumps(result, indent=2, sort_keys=True), flush=True)
     return result
 
@@ -329,11 +440,25 @@ def main(
     height: int = 480,
     width: int = 832,
     seed: int = 42,
+    comparison_id: str = "",
+    run_name_override: str = "",
+    resume_from_checkpoint: str = "",
+    volume_commit_interval_seconds: int = 600,
     smoke: bool = False,
     prepare_only: bool = False,
     skip_preprocess: bool = False,
     paired: bool = False,
 ) -> None:
+    from datetime import datetime, timezone
+
+    if paired and resume_from_checkpoint:
+        raise ValueError(
+            "paired mode cannot share one resume checkpoint across two objectives"
+        )
+    comparison_id = comparison_id.strip() or (
+        f"ftpp_pair_s{seed}_"
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    )
     kwargs = dict(
         max_train_steps=max_train_steps,
         dataset=dataset,
@@ -351,23 +476,35 @@ def main(
         height=height,
         width=width,
         seed=seed,
+        comparison_id=comparison_id,
+        run_name_override=run_name_override,
+        resume_from_checkpoint=resume_from_checkpoint,
+        volume_commit_interval_seconds=volume_commit_interval_seconds,
         smoke=smoke,
         prepare_only=prepare_only,
         skip_preprocess=skip_preprocess,
     )
     if paired:
         # Materialize and commit the deterministic split once before the two
-        # scientific jobs start. Otherwise simultaneous preprocess jobs can
-        # race on the shared Modal volume.
+        # scientific jobs start. Otherwise simultaneous preprocessing can race
+        # on the shared Modal volume.
         prep_kwargs = dict(kwargs)
         prep_kwargs["prepare_only"] = True
         prep_kwargs["skip_preprocess"] = False
+        prep_kwargs["run_name_override"] = ""
         train.remote(objective="posterior_projection", **prep_kwargs)
+        if prepare_only:
+            return
 
         run_kwargs = dict(kwargs)
         run_kwargs["prepare_only"] = False
         run_kwargs["skip_preprocess"] = True
+        run_kwargs["run_name_override"] = ""
         train.spawn(objective="posterior_projection", **run_kwargs)
         train.spawn(objective="flowmap_grpo", **run_kwargs)
+        print(
+            f"Spawned paired FTPP/GRPO jobs in W&B group {comparison_id!r}.",
+            flush=True,
+        )
         return
     train.spawn(objective=objective, **kwargs)
