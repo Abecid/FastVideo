@@ -5,6 +5,9 @@ import math
 import pytest
 import torch
 
+from fastvideo.train.methods.rl.common.anyflow_schedule import (
+    anyflow_inference_schedule,
+)
 from fastvideo.train.methods.rl.common.finite_transition import (
     append_data_endpoint,
     endpoint_anchor_parameters,
@@ -24,6 +27,49 @@ def test_append_and_validate_training_schedule() -> None:
     )
     validate_training_schedule(schedule, stochastic_steps=4)
     assert schedule.tolist()[-1] == 0.0
+
+
+def test_released_anyflow_schedule_parity() -> None:
+    eval_schedule = anyflow_inference_schedule(
+        num_steps=4,
+        shift=5.0,
+        num_train_timesteps=1000,
+        device="cpu",
+    )
+    expected_eval = torch.tensor(
+        [1000.0, 937.5, 833.3333333, 625.0, 0.0],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(
+        eval_schedule,
+        expected_eval,
+        atol=1.0e-4,
+        rtol=0.0,
+    )
+
+    train_schedule = anyflow_inference_schedule(
+        num_steps=5,
+        shift=5.0,
+        num_train_timesteps=1000,
+        device="cpu",
+    )
+    expected_train = torch.tensor(
+        [
+            1000.0,
+            952.3809524,
+            882.3529412,
+            769.2307692,
+            555.5555556,
+            0.0,
+        ],
+        dtype=torch.float32,
+    )
+    assert torch.allclose(
+        train_schedule,
+        expected_train,
+        atol=1.0e-4,
+        rtol=0.0,
+    )
 
 
 def test_endpoint_anchor_matches_affine_path() -> None:
