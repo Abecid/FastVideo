@@ -246,7 +246,9 @@ def main() -> None:
             num_gpus=args.num_gpus,
         ),
     }
-    if args.download_model:
+    # Modal always requests W&B validation, so that path also warms the full
+    # checkpoint once into the shared cache before paired jobs are spawned.
+    if args.download_model or args.require_wandb:
         summary["model_cache"] = warm_model_snapshot(args.model_id)
     print("Finite-transition posterior preflight passed:")
     print(json.dumps(summary, indent=2, sort_keys=True))
