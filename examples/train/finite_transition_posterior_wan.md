@@ -25,21 +25,25 @@ or action likelihood. Flow-Map GRPO introduces Anchored Stochastic Flow Map
 Composition (ASFMC) to solve this without pretending that an arbitrary Gaussian
 perturbation of a long-range map is path preserving.
 
-For two-time maps, the paper recommends a **local anchor**. After the long map
-`t -> r`, the model moves a short additional interval `r -> tau` toward data,
-with
+For two-time maps, the paper recommends a **local anchor**. Conceptually, after
+the long deterministic map `t -> r`, the construction anchors a short interval
+`r -> tau` toward data and conditionally resamples back to `r`, where
 
 ```text
 tau = r + delta
 ```
 
 in the paper's noise-to-data convention. FastVideo/AnyFlow uses the reverse
-coordinate, so the implementation subtracts the same normalized interval from
-the absolute reverse timestep.
+coordinate `q=1-r`, so the conceptual anchor is `q_tau=q_r-delta`.
 
-At the local anchor, the method evaluates the instantaneous velocity and uses
-the short reverse-SDE Euler-Maruyama Gaussian. The defaults follow the released
-Flow-Map-GRPO two-time setting:
+The paper eliminates the explicit short round trip and gives a closed-form
+Euler-Maruyama Gaussian evaluated at the deterministic target `x_r`. Our code
+queries AnyFlow's instantaneous reverse velocity at that target by setting both
+time arguments to `r`, then applies the paper equation after converting the time
+coordinate and velocity sign. This avoids an unsupported Gaussian approximation
+over the original long-range transition.
+
+The defaults follow the released Flow-Map-GRPO two-time setting:
 
 ```yaml
 anchor_type: local
