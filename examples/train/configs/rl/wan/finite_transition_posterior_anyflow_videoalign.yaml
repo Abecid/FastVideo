@@ -1,10 +1,10 @@
 # Finite-Transition Posterior Projection (FTPP) on released AnyFlow-Wan 1.3B.
 #
 # Scientific question:
-#   Given the same ASFMC counterfactual transition group used by Flow-Map GRPO,
-#   does direct forward-KL projection of the reward-tilted local posterior
-#   converge faster and preserve video motion/diversity better than clipped
-#   likelihood-ratio optimization?
+#   Given the same local-ASFMC counterfactual transition group used by
+#   Flow-Map GRPO for two-time maps, does direct forward-KL projection of the
+#   reward-tilted local posterior converge faster and preserve video
+#   motion/diversity better than likelihood-ratio optimization?
 #
 # Run the matched baseline by overriding:
 #   --method.objective flowmap_grpo
@@ -32,6 +32,13 @@ method:
 
   # Primary contribution. ``flowmap_grpo`` is the matched update-rule ablation.
   objective: posterior_projection
+
+  # Local anchor is the Flow-Map-GRPO construction intended for two-time maps
+  # such as MeanFlow/AnyFlow. ``endpoint`` remains available as an ablation.
+  anchor_type: local
+  local_anchor_delta: 0.03
+  local_noise_scale: 0.7
+  local_terminal_base_sigma: 0.05
 
   # Released AnyFlow / Flow-Map-GRPO operating point.
   flow_shift: 5.0
