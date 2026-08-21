@@ -85,6 +85,9 @@ training:
 - DiffusionNFT Wan video RL: see `examples/train/diffusion_nft_wan_video.md`.
 - AnyFlow finite-transition posterior projection and matched Flow-Map-GRPO
   experiment: see `examples/train/finite_transition_posterior_wan.md`.
+- Coding-agent repair, invariants, rollout, and W&B interpretation context for
+  that experiment: see
+  `examples/train/finite_transition_posterior_agent_context.md`.
 
 ## Directory Layout
 
