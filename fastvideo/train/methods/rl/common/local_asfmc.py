@@ -38,8 +38,8 @@ def local_anchor_gaussian_parameters(
         num_train_timesteps: Usually 1000 for Wan.
         delta_fraction: Short anchor interval in normalized time; the paper's
             released MeanFlow setting uses 0.03.
-        noise_scale: Local reverse-SDE stochasticity coefficient; the released
-            Flow-Map-GRPO setting uses 0.7.
+        noise_scale: Positive local reverse-SDE stochasticity coefficient; the
+            released Flow-Map-GRPO setting uses 0.7.
         terminal_base_sigma: Lower bound for the paper-coordinate data
             coefficient. It stabilizes the first near-noise transition; the
             released setting is 0.05.
@@ -67,8 +67,8 @@ def local_anchor_gaussian_parameters(
         raise ValueError("num_train_timesteps must be positive")
     if not 0.0 < float(delta_fraction) < 1.0:
         raise ValueError("delta_fraction must lie in (0, 1)")
-    if float(noise_scale) < 0.0:
-        raise ValueError("noise_scale must be non-negative")
+    if float(noise_scale) <= 0.0:
+        raise ValueError("noise_scale must be positive")
     if not 0.0 < float(terminal_base_sigma) < 1.0:
         raise ValueError("terminal_base_sigma must lie in (0, 1)")
 
