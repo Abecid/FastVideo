@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reusable RL training primitives."""
 
+from fastvideo.train.methods.rl.common.anyflow_schedule import (
+    anyflow_inference_schedule,
+)
 from fastvideo.train.methods.rl.common.finite_transition import (
     append_data_endpoint,
     clipped_grpo_loss,
@@ -40,6 +43,7 @@ __all__ = [
     "RLValidationConfig",
     "SamplingConfig",
     "SamplingResult",
+    "anyflow_inference_schedule",
     "append_data_endpoint",
     "clipped_grpo_loss",
     "distributed_k_repeat_indices",
