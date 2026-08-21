@@ -156,6 +156,25 @@ class ReproducibleFiniteTransitionPosteriorMethod(
     ) -> None:
         super().__init__(cfg=cfg, role_models=role_models)
         mcfg = self.method_config
+
+        self._require_train_eval_schedule_match = bool(
+            mcfg.get("require_train_eval_schedule_match", True)
+        )
+        if self._require_train_eval_schedule_match:
+            if self._train_map_steps != self._eval_map_steps:
+                raise ValueError(
+                    "scientific FTPP requires train_map_steps == "
+                    "eval_map_steps so reward alignment acts on the deployed "
+                    "AnyFlow transition grid"
+                )
+            if self._stochastic_steps != self._eval_map_steps - 1:
+                raise ValueError(
+                    "scientific FTPP requires stochastic_steps == "
+                    "eval_map_steps - 1: all positive-target deployment "
+                    "transitions are trainable and the final data transition "
+                    "only completes candidates for reward"
+                )
+
         self._anchor_type = str(
             mcfg.get("anchor_type", "local") or "local"
         ).strip().lower()
@@ -276,6 +295,9 @@ class ReproducibleFiniteTransitionPosteriorMethod(
         )
         is_local = float(self._anchor_type == "local")
         metrics["ftp/schedule_is_official_anyflow"] = 1.0
+        metrics["ftp/train_eval_schedule_match_required"] = float(
+            self._require_train_eval_schedule_match
+        )
         metrics["ftp/anchor_is_local"] = is_local
         metrics["ftp/local_anchor_delta"] = self._local_anchor_delta
         metrics["ftp/local_noise_scale"] = self._local_noise_scale
