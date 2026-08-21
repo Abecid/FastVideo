@@ -2,9 +2,10 @@
 """Reproducible finite-transition posterior training entry point.
 
 This subclass keeps the posterior-projection experiment in
-``finite_transition_posterior.py`` while adding two pieces needed for the
+``finite_transition_posterior.py`` while adding three pieces needed for the
 scientific AnyFlow run:
 
+* the released AnyFlow finite-map timestep grid;
 * local-anchor ASFMC, the Flow-Map-GRPO construction designed for a two-time
   flow map; and
 * checkpoint persistence for held-out baselines and efficiency counters.
@@ -19,6 +20,9 @@ from typing import Any
 import torch
 
 from fastvideo.train.methods.base import LogScalar
+from fastvideo.train.methods.rl.common.anyflow_schedule import (
+    anyflow_inference_schedule,
+)
 from fastvideo.train.methods.rl.common.local_asfmc import (
     local_anchor_gaussian_parameters,
 )
@@ -142,7 +146,7 @@ class _FiniteTransitionRunState:
 class ReproducibleFiniteTransitionPosteriorMethod(
     FiniteTransitionPosteriorMethod
 ):
-    """FTPP with local ASFMC and resume-safe scientific evaluation."""
+    """FTPP with the official AnyFlow grid and resume-safe evaluation."""
 
     def __init__(
         self,
@@ -182,6 +186,27 @@ class ReproducibleFiniteTransitionPosteriorMethod(
             _FiniteTransitionRunState(self)
         )
         return states
+
+    def _build_schedule(
+        self,
+        *,
+        steps: int,
+        override: list[float] | None,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Use the exact grid from AnyFlow's released FlowMap scheduler."""
+        if override is not None:
+            return super()._build_schedule(
+                steps=steps,
+                override=override,
+                device=device,
+            )
+        return anyflow_inference_schedule(
+            num_steps=steps,
+            shift=self._flow_shift,
+            num_train_timesteps=self.student.num_train_timesteps,
+            device=device,
+        )
 
     def _branch_policy(
         self,
@@ -250,6 +275,7 @@ class ReproducibleFiniteTransitionPosteriorMethod(
             iteration,
         )
         is_local = float(self._anchor_type == "local")
+        metrics["ftp/schedule_is_official_anyflow"] = 1.0
         metrics["ftp/anchor_is_local"] = is_local
         metrics["ftp/local_anchor_delta"] = self._local_anchor_delta
         metrics["ftp/local_noise_scale"] = self._local_noise_scale
