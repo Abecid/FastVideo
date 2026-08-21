@@ -40,11 +40,17 @@ method:
   local_noise_scale: 0.7
   local_terminal_base_sigma: 0.05
 
-  # Released AnyFlow / Flow-Map-GRPO operating point.
+  # Train on the exact four-step deployment grid. The first three transitions
+  # have positive target time and can be stochastic policy decisions; the final
+  # 625 -> 0 transition deterministically completes the candidate for reward.
+  # Do not introduce a separate five-step training grid: AnyFlow is explicitly
+  # conditioned on both source and target time, so training off-grid weakens the
+  # connection to the deterministic four-step model being evaluated.
+  require_train_eval_schedule_match: true
   flow_shift: 5.0
-  train_map_steps: 5
+  train_map_steps: 4
   eval_map_steps: 4
-  stochastic_steps: 4
+  stochastic_steps: 3
   group_size: 4
   target_ess_ratio: 0.50
   reward_bisection_steps: 40
