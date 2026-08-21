@@ -1,13 +1,210 @@
 # Finite-Transition Posterior Alignment: implementation and experiment handoff
 
-Last updated: 2026-08-20 22:17 PDT
+Last updated: 2026-08-21 03:05 PDT
 
 This report is a technical handoff for reviewing the finite-transition
 posterior-projection experiment on AnyFlow-Wan. It records what was implemented,
 what was changed while executing the real Modal jobs, what the experiment has
 shown so far, and which scientific or implementation questions remain open.
 
-## Executive summary
+## Corrected-grid final execution (authoritative)
+
+This section supersedes the pre-grid-fix report below. The earlier `r3` run is
+scientifically invalid because it trained on FastVideo's generic shifted grid,
+including the pathological `24.414` target. It was stopped and was not resumed.
+
+### Outcome
+
+- Corrected source commit supplied for execution: `9e1b14c6060c806e96719a3027adbc2cc9c682c5`.
+- Execution repair commit pushed during the rerun: `36f108ac`.
+- Comparison ID: `ftpp_gridfix_s42_r1`.
+- Modal app: [completed paired run](https://modal.com/apps/hao-ai-lab/main/ap-ixPifesPzqDA48d7uwWZvQ).
+- Posterior W&B: [`vifgaxeb`](https://wandb.ai/adamlee00/finite-transition-posterior-wan/runs/vifgaxeb).
+- Matched GRPO W&B: [`2jjy6kf1`](https://wandb.ai/adamlee00/finite-transition-posterior-wan/runs/2jjy6kf1).
+- State: both arms finished 200 fresh updates, five held-out evaluations,
+  `checkpoint-200`, 40 qualitative videos, and final W&B sync.
+- Resume state: empty for both arms. No old checkpoint was reused.
+
+The corrected experiment does **not** show that FTPP is better. At step 200,
+posterior projection remained below the untouched-model MQ baseline and below
+matched GRPO, while using about 18% more training GPU-hours. Both methods
+preserved held-out VQ/TA within the configured tolerances and preserved motion
+and diversity, but neither passed the primary or aggregate success gate.
+
+The mandatory stop rule therefore applies: do not extend this pair to 1,200
+steps. Audit reward/generalization, paired validation, raw-versus-EMA behavior,
+and update scale before another expensive run.
+
+### Exact schedule audit
+
+Every one of the 400 training-history rows across the two arms was audited via
+the W&B API. Both runs contained exactly these transition pairs:
+
+```text
+1000.000 -> 937.500
+937.500  -> 833.3333129882812
+833.3333129882812 -> 625.000
+```
+
+There was no `625 -> 0` training row, no `24.414` target, and no other pair.
+Across both complete histories:
+
+```text
+ftp/schedule_is_official_anyflow = 1
+ftp/train_eval_schedule_match_required = 1
+ftp/local_anchor_delta_was_clipped = 0
+guard violations = 0
+```
+
+This is the strongest evidence from the rerun: the corrected experiment really
+did train and evaluate on the released four-step AnyFlow deployment grid.
+
+### Smoke and runtime repair
+
+The first corrected smoke allocation stopped before W&B initialization because
+the new scientific guard correctly rejected a legacy unit-test fixture whose
+fake train and evaluation grids still differed. The repair was deliberately
+narrow:
+
+1. Make the fixture use the same two-step train/evaluation grid.
+2. Add `test_anyflow_schedule.py` explicitly to the Modal runtime gate.
+
+Commit `36f108ac` contains only those changes. After the repair, the remote gate
+passed `32 tests` in the preparation job and independently in both smoke arms.
+The paired smoke then completed two updates and `checkpoint-2` for each arm:
+
+- Posterior smoke [`k26m46ie`](https://wandb.ai/adamlee00/finite-transition-posterior-wan/runs/k26m46ie).
+- GRPO smoke [`10b8va34`](https://wandb.ai/adamlee00/finite-transition-posterior-wan/runs/10b8va34).
+- Modal smoke app: [completed](https://modal.com/apps/hao-ai-lab/main/ap-KQeJ3BX73kttt7aJVDj7nc).
+
+The local shell did not have `pytest` or `pre-commit`. Static compilation and
+`git diff --check` passed locally; the real H100 container supplied the focused
+pytest evidence. No training runtime error occurred after the fixture repair.
+
+### Corrected held-out trajectory
+
+Both arms had the exact same step-zero EMA validation baseline:
+
+| Metric | Baseline |
+|---|---:|
+| MQ | -0.0395322 |
+| VQ | 0.3667467 |
+| TA | 0.7974652 |
+| temporal L1 | 0.0326357 |
+| latent diversity RMS | 0.9803215 |
+| video diversity RMS | 0.3234403 |
+
+MQ deltas from that baseline were:
+
+| Step | Posterior | GRPO | Posterior - GRPO |
+|---:|---:|---:|---:|
+| 50 | +0.000459 | +0.001198 | -0.000740 |
+| 100 | -0.008580 | -0.001482 | -0.007098 |
+| 150 | -0.019519 | -0.009591 | -0.009928 |
+| 200 | -0.005861 | -0.001351 | -0.004510 |
+
+The step-200 comparison was:
+
+| Metric | Posterior | GRPO | Posterior - GRPO |
+|---|---:|---:|---:|
+| MQ | -0.045393 | -0.040883 | -0.004510 |
+| MQ delta | -0.005861 | -0.001351 | -0.004510 |
+| VQ | 0.357432 | 0.354825 | +0.002607 |
+| VQ delta | -0.009314 | -0.011921 | +0.002607 |
+| TA | 0.794246 | 0.807925 | -0.013679 |
+| TA delta | -0.003219 | +0.010460 | -0.013679 |
+| motion/base | 1.000565 | 0.998119 | +0.002446 |
+| latent diversity/base | 0.999369 | 1.000500 | -0.001131 |
+| video diversity RMS | 0.323189 | 0.323468 | -0.000280 |
+| cumulative GPU-hours | 9.0283 | 7.6463 | +1.3820 |
+| primary gate | 0 | 0 | -- |
+| all-objective gate | 0 | 0 | -- |
+
+Posterior used 18.1% more logged training GPU-hours. Mean training-step time was
+`41.47s` over its first 50 groups and `40.29s` over its last 50, versus GRPO's
+`34.94s` and `34.80s`. The full Modal app, including preparation, baseline
+validation, and all checkpoint evaluations, ran for about three hours.
+
+### Optimization diagnostics
+
+The training-side data do not rescue the held-out result:
+
+- Posterior mean candidate MQ changed from `0.1494` over the first 50 groups to
+  `-0.0255` over the last 50. GRPO changed from `0.1418` to `0.0136`.
+- Within-group reward-selection gain remained positive and rose slightly:
+  posterior `0.0828 -> 0.0907`, GRPO `0.0736 -> 0.0906`.
+- ESS stayed at the configured ratio near `0.5`; fixed ESS therefore did not
+  diagnose whether the reward tilt was useful.
+- Mean grad norms remained finite and similar: posterior `0.00492 -> 0.00461`,
+  GRPO `0.00479 -> 0.00448`.
+- Only five positive post-update probes were logged per arm. Maximum approximate
+  KL was `1.19e-7` for posterior and `8.94e-8` for GRPO; maximum absolute
+  log-probability delta was `4.88e-4` and `3.66e-4`, respectively.
+
+Candidate groups use different prompts over time, so first-versus-last reward
+means are descriptive rather than a paired generalization test. Nevertheless,
+there is no evidence that training MQ improved while held-out MQ was hidden by
+noise. The extremely small update probes support the guardrail's concern that
+the current one-update FTPP and GRPO objectives are structurally close and may
+both be under-updating.
+
+### Required diagnostics still missing
+
+The corrected run faithfully logged the schedule, rewards, motion, diversity,
+efficiency, checkpoints, and qualitative videos. It did **not** implement all
+diagnostics required by the new guardrail:
+
+- Validation is run only under `_ema_context()`; no raw-model validation series
+  is logged, so raw-versus-EMA trend coherence cannot be checked.
+- Per-prompt paired deltas and paired confidence intervals are absent. The
+  existing independent-SEM margins remain about `0.25`, far too wide for a
+  `0.01-0.02` effect and inappropriate for fixed prompt/seed pairs.
+- The final VideoAlign checkpoint load does not report explicit base, adapter,
+  and reward-head coverage ratios. Deterministic preflight scores were stable
+  and nontrivial in every job (`MQ=0.440835`, `VQ=-0.832449`, `TA=-1.899382`),
+  but Transformers emitted the known Qwen base-load remapping report before the
+  VideoAlign checkpoint was applied. Calibration parity remains unproven.
+- The two arms are seed-matched on-policy runs, not literal shared-action runs
+  after their parameters diverge.
+
+These gaps prevent a strong statistical claim about the small posterior-GRPO
+difference, but they do not change the practical decision: neither method
+improved the primary held-out objective at 200 steps.
+
+### Decision and recommended next work
+
+Stop this FTPP configuration and do not resume either corrected checkpoint for
+an extension. Preserve them only for diagnosis. Before another paired run:
+
+1. Log per-prompt `(prompt_index, sample_seed)` results and compute paired
+   posterior-versus-GRPO and current-versus-baseline confidence intervals.
+2. Evaluate raw and EMA weights at every validation checkpoint.
+3. Assert and record VideoAlign base/adapter/head checkpoint coverage and run
+   upstream calibration-video parity.
+4. Compare update rules under matched behavior rollouts or explicitly retain
+   the current seed-matched on-policy interpretation.
+5. Run an update-scale or target-KL ablation; the observed post-update probes
+   are tiny for both objectives.
+6. If likelihood objectives remain tied, test the guardrail's suggested
+   finite-velocity posterior regression rather than tuning two nearly identical
+   score-function estimators.
+
+Final checkpoints on Modal volume `fastvideo-runs`:
+
+```text
+/root/FastVideo/outputs/finite_transition_posterior/
+  anyflow_ftp_posterior_projection_videoalign_mq_f81_s42_20260821_065221/checkpoint-200
+  anyflow_ftp_flowmap_grpo_videoalign_mq_f81_s42_20260821_065227/checkpoint-200
+```
+
+## Archived pre-grid report (scientifically invalid)
+
+Everything below this heading describes the earlier generic-scheduler attempts,
+including `r3`. It is retained as a runtime-debugging history only. Its metrics,
+schedule interpretation, endpoint clipping fix, resume advice, and conclusions
+must not be used as scientific evidence for the corrected AnyFlow grid.
+
+### Former executive summary
 
 - Repository: `Abecid/FastVideo`
 - Branch: `adam/finite-transition-alignment`
