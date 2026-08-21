@@ -171,6 +171,36 @@ def _patch_videoalign_video_reader() -> None:
         vision_mod.get_video_reader_backend.cache_clear()
 
 
+def _patch_videoalign_base_model_path(inference_mod: Any) -> None:
+    """Route VideoAlign through an immutable local Qwen snapshot when set.
+
+    Multiple distributed jobs may otherwise ask Hugging Face Hub to update the
+    same mounted cache concurrently. Using the prepared snapshot directly
+    keeps paired scientific runs read-only and avoids transient partial-cache
+    visibility.
+    """
+    original = inference_mod.create_model_and_processor
+    if getattr(original, "_fastvideo_local_base_model", False):
+        return
+
+    def create_model_and_processor_with_local_base(*args, **kwargs):
+        model_config = kwargs.get("model_config")
+        if model_config is None and args:
+            model_config = args[0]
+        local_path = os.environ.get("VIDEOALIGN_BASE_MODEL_PATH", "").strip()
+        if local_path:
+            if not os.path.isdir(local_path):
+                raise FileNotFoundError(
+                    "VIDEOALIGN_BASE_MODEL_PATH does not exist: "
+                    f"{local_path}"
+                )
+            model_config.model_name_or_path = local_path
+        return original(*args, **kwargs)
+
+    create_model_and_processor_with_local_base._fastvideo_local_base_model = True
+    inference_mod.create_model_and_processor = create_model_and_processor_with_local_base
+
+
 def _patch_videoalign_modules() -> Any:
     global _VIDEOALIGN_PATCHED
     inference_mod = import_module("inference")
@@ -179,6 +209,7 @@ def _patch_videoalign_modules() -> Any:
 
     reward_model_mod = import_module("reward_model")
     _patch_videoalign_video_reader()
+    _patch_videoalign_base_model_path(inference_mod)
     _patch_load_state_dict(reward_model_mod.Qwen2VLRewardModelBT)
     try:
         peft_mod = import_module("peft")

@@ -29,6 +29,24 @@ from fastvideo.train.methods.rl.finite_transition_posterior import (
 _BASELINE_BUFFER_BYTES = 65536
 
 
+def _effective_local_anchor_delta_fraction(
+    target_time: torch.Tensor | float,
+    *,
+    num_train_timesteps: int,
+    configured_delta_fraction: float,
+) -> float:
+    """Truncate the local interval at AnyFlow's data endpoint."""
+    target = torch.as_tensor(target_time).detach().float()
+    if target.numel() != 1:
+        raise ValueError("local ASFMC target time must be scalar")
+    target_fraction = float(target.item()) / float(num_train_timesteps)
+    if target_fraction <= 0.0:
+        raise ValueError(
+            "local ASFMC requires a target strictly before the data endpoint"
+        )
+    return min(float(configured_delta_fraction), target_fraction)
+
+
 class _FiniteTransitionRunState:
     """DCP-compatible wrapper for method-owned scientific run state.
 
@@ -156,6 +174,7 @@ class ReproducibleFiniteTransitionPosteriorMethod(
             raise ValueError(
                 "method.local_terminal_base_sigma must lie in (0, 1)"
             )
+        self._last_effective_local_anchor_delta = self._local_anchor_delta
 
     def checkpoint_state(self) -> dict[str, Any]:
         states = super().checkpoint_state()
@@ -185,16 +204,12 @@ class ReproducibleFiniteTransitionPosteriorMethod(
             target_time,
             batch,
         )
-        delta_absolute = (
-            self._local_anchor_delta
-            * float(self.student.num_train_timesteps)
+        effective_delta = _effective_local_anchor_delta_fraction(
+            target_time,
+            num_train_timesteps=self.student.num_train_timesteps,
+            configured_delta_fraction=self._local_anchor_delta,
         )
-        anchor_time = target_time.to(torch.float32) - delta_absolute
-        if torch.any(anchor_time < 0.0):
-            raise ValueError(
-                "local ASFMC anchor crosses the data endpoint: target="
-                f"{float(target_time)}, delta={delta_absolute}"
-            )
+        self._last_effective_local_anchor_delta = effective_delta
 
         # The closed-form local conditional is evaluated at x_r. AnyFlow's
         # instantaneous reverse velocity is obtained by setting both time
@@ -219,7 +234,7 @@ class ReproducibleFiniteTransitionPosteriorMethod(
             instantaneous_reverse_velocity,
             target_batch,
             num_train_timesteps=self.student.num_train_timesteps,
-            delta_fraction=self._local_anchor_delta,
+            delta_fraction=effective_delta,
             noise_scale=self._local_noise_scale,
             terminal_base_sigma=self._local_terminal_base_sigma,
         )
@@ -243,13 +258,19 @@ class ReproducibleFiniteTransitionPosteriorMethod(
         )
         if self._anchor_type == "local":
             target = float(metrics["ftp/target_timestep"])
-            metrics["ftp/local_anchor_timestep"] = target - (
-                self._local_anchor_delta
-                * float(self.student.num_train_timesteps)
+            effective_delta = self._last_effective_local_anchor_delta
+            metrics["ftp/local_anchor_effective_delta"] = effective_delta
+            metrics["ftp/local_anchor_delta_was_clipped"] = float(
+                effective_delta < self._local_anchor_delta
             )
+            metrics["ftp/local_anchor_timestep"] = max(0.0, target - (
+                effective_delta
+                * float(self.student.num_train_timesteps)
+            ))
         return losses, outputs, metrics
 
 
 __all__ = [
     "ReproducibleFiniteTransitionPosteriorMethod",
+    "_effective_local_anchor_delta_fraction",
 ]

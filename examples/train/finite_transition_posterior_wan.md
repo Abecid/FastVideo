@@ -57,6 +57,10 @@ The local conditional has approximation error of order
 transition as one Gaussian. `anchor_type: endpoint` remains available as an
 ablation, but it injects stronger randomness and relies on an accurate long
 map to the clean endpoint, which is less natural for a general two-time model.
+For a final branchable target with reverse time `q < delta`, the local interval
+is truncated to `delta_eff=q`, placing the anchor at the data endpoint without
+crossing it. The configured delta, effective delta, clipping indicator, and
+anchor timestep are logged separately.
 
 ## One training update
 

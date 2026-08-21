@@ -5,11 +5,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
 from fastvideo.pipelines import TrainingBatch
 import fastvideo.train.methods.rl.finite_transition_posterior as ftp
+from fastvideo.train.methods.rl.finite_transition_posterior import (
+    _prepare_validation_log_entry,
+)
 from fastvideo.train.methods.rl.finite_transition_posterior_repro import (
     ReproducibleFiniteTransitionPosteriorMethod,
 )
@@ -262,3 +266,28 @@ def test_posterior_projection_has_zero_update_for_equal_rewards(
     assert float(loss_map["total_loss"].detach()) == pytest.approx(0.0)
     assert torch.equal(before, after)
     assert float(metrics["ftp/zero_std_group"]) == 1.0
+
+
+def test_validation_log_entry_caps_before_compacting_media() -> None:
+    media = torch.rand(3, 5, 8, 12)
+
+    skipped = _prepare_validation_log_entry(
+        index=8,
+        prompt="skipped",
+        media=media,
+        rewards={"videoalign_mq": 0.0},
+        max_samples=8,
+    )
+    selected = _prepare_validation_log_entry(
+        index=7,
+        prompt="selected",
+        media=media,
+        rewards={"videoalign_mq": 1.0},
+        max_samples=8,
+    )
+
+    assert skipped is None
+    assert selected is not None
+    assert isinstance(selected["media"], np.ndarray)
+    assert selected["media"].dtype == np.uint8
+    assert selected["media"].shape == (5, 3, 8, 12)

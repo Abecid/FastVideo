@@ -38,7 +38,8 @@ dependencies = [
     "flashinfer-python",
 
     # Acceleration & Optimization
-    "accelerate==1.0.1",
+    # transformers 5.x requires accelerate>=1.1.0 for TrainingArguments.
+    "accelerate==1.1.0",
 
     # Computer Vision & Image Processing
     "opencv-python>=4.10.0.84",

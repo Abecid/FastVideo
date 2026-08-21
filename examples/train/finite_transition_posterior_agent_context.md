@@ -141,6 +141,12 @@ mean = x_r - delta * lambda^2 * (x_r / s + v_q)
 std  = lambda * sqrt(2*q/s) * sqrt(delta).
 ```
 
+If the last branchable target is closer to the data endpoint than the configured
+`delta`, the implementation uses `delta_eff = min(delta, q)` so the conceptual
+local anchor lands exactly at `q=0` instead of crossing the endpoint. This is
+the same short-interval construction with its final interval truncated; W&B
+logs both the configured and effective delta.
+
 Defaults:
 
 ```yaml

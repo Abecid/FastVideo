@@ -72,6 +72,27 @@ from fastvideo.training.training_utils import (
 logger = init_logger(__name__)
 
 
+def _prepare_validation_log_entry(
+    *,
+    index: int,
+    prompt: str,
+    media: torch.Tensor,
+    rewards: dict[str, float],
+    max_samples: int | None,
+) -> dict[str, Any] | None:
+    """Select and compact one globally ordered qualitative sample."""
+    if max_samples is not None and int(index) >= max_samples:
+        return None
+    return {
+        "index": int(index),
+        "prompt": prompt,
+        # At 81x480x832, the decoded float tensor is about 390 MiB. Convert
+        # selected videos to CPU uint8 before NCCL-backed object gathering.
+        "media": media_to_video_array(media),
+        "rewards": rewards,
+    }
+
+
 class _FiniteTransitionEMAState:
     """DCP wrapper for the method-owned student EMA."""
 
@@ -927,14 +948,15 @@ class FiniteTransitionPosteriorMethod(TrainingMethod):
                     sample_rewards["temporal_l1"] = float(
                         motion[sample_offset]
                     )
-                    local_logs.append(
-                        {
-                            "index": int(global_index),
-                            "prompt": prompts[sample_offset],
-                            "media": media[sample_offset],
-                            "rewards": sample_rewards,
-                        }
+                    log_entry = _prepare_validation_log_entry(
+                        index=int(global_index),
+                        prompt=prompts[sample_offset],
+                        media=media[sample_offset],
+                        rewards=sample_rewards,
+                        max_samples=config.max_samples,
                     )
+                    if log_entry is not None:
+                        local_logs.append(log_entry)
 
         if not local_masks:
             return {}
@@ -1110,8 +1132,13 @@ class FiniteTransitionPosteriorMethod(TrainingMethod):
             logs = logs[:max_samples]
         artifacts = []
         for item in logs:
+            media = item["media"]
+            if isinstance(media, torch.Tensor):
+                # Backwards compatibility for callers and old checkpoints
+                # that still provide decoded tensors here.
+                media = media_to_video_array(media)
             artifact = self.tracker.video(
-                media_to_video_array(item["media"]),
+                media,
                 caption=validation_caption(
                     str(item["prompt"]),
                     item["rewards"],

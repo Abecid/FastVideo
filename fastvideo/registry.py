@@ -867,8 +867,14 @@ def _register_configs() -> None:
         workload_types=(WorkloadType.T2V, ),
         hf_model_paths=[
             "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            "nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers",
         ],
-        model_detectors=[lambda path: "wanpipeline" in path.lower()],
+        model_detectors=[
+            lambda path: (
+                "wanpipeline" in path.lower()
+                or "anyflowpipeline" in path.lower()
+            )
+        ],
         model_family="wan",
         default_preset="wan_t2v_1_3b",
     )

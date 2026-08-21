@@ -190,6 +190,31 @@ def test_embedder_gate_not_in_state_dict() -> None:
     assert not any("_r_embedder_gate" in k for k in keys)
 
 
+def test_embedder_materializes_gate_after_meta_initialization() -> None:
+    """The FSDP loader constructs on meta and must rebuild the gate because
+    non-persistent buffers are deliberately absent from the checkpoint.
+    """
+    from fastvideo.models.dits.wanvideo import WanTimeTextImageEmbedding
+
+    with torch.device("meta"):
+        emb = WanTimeTextImageEmbedding(
+            dim=32,
+            time_freq_dim=64,
+            text_embed_dim=16,
+            r_embedder=True,
+            r_embedder_fusion="gated",
+            r_embedder_gate_value=0.375,
+        )
+
+    assert emb._r_embedder_gate.is_meta
+    emb.materialize_non_persistent_buffers(
+        device=torch.device("cpu"), dtype=torch.float32)
+    assert not emb._r_embedder_gate.is_meta
+    assert emb._r_embedder_gate.device.type == "cpu"
+    assert emb._r_embedder_gate.item() == pytest.approx(0.375)
+    assert "_r_embedder_gate" not in emb.state_dict()
+
+
 # ---------------------------------------------------------------------------
 # Task 3: WanTransformer3DModel threads r_timestep through.
 # ---------------------------------------------------------------------------

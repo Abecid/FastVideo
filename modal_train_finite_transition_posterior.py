@@ -94,22 +94,6 @@ image = (
         "examples/train/prepare_finite_transition_posterior_assets.py "
         "examples/train/check_finite_transition_posterior_environment.py "
         "modal_train_finite_transition_posterior.py",
-        "cd /root/FastVideo && pytest -q "
-        "fastvideo/tests/train/methods/test_finite_transition_posterior_core.py "
-        "fastvideo/tests/train/methods/test_finite_transition_posterior_method.py "
-        "fastvideo/tests/train/methods/test_finite_transition_posterior_repro.py",
-        "cd /root/FastVideo && python -m "
-        "examples.train.prepare_finite_transition_posterior_assets --help >/dev/null",
-        "cd /root/FastVideo && python -m "
-        "examples.train.check_finite_transition_posterior_environment --help >/dev/null",
-        "cd /root/FastVideo && python -c '"
-        "from fastvideo.train.methods.rl.rewards.hpsv3 import "
-        "_patch_hpsv3_state_dict_loader, _patch_transformers_video_input_alias; "
-        "_patch_transformers_video_input_alias(); "
-        "_patch_hpsv3_state_dict_loader(); "
-        "from fastvideo.train.methods.rl.rewards.videoalign import "
-        "_patch_videoalign_modules; _patch_videoalign_modules(); "
-        "print(\"reward runtimes ok\")'",
     )
     .env(
         {
@@ -233,6 +217,85 @@ def train(
         ],
         check=True,
     )
+    if skip_preprocess:
+        # Paired arms consume the Qwen base snapshot prepared and committed by
+        # the one-time asset job. Point VideoAlign at the immutable directory
+        # instead of letting concurrent jobs mutate shared Hub cache metadata.
+        snapshots_root = (
+            Path(os.environ["HF_HUB_CACHE"])
+            / "models--Qwen--Qwen2-VL-2B-Instruct"
+            / "snapshots"
+        )
+        videoalign_base_path = ""
+        missing_by_snapshot = {}
+        for snapshot in sorted(snapshots_root.glob("*"), reverse=True):
+            index_path = snapshot / "model.safetensors.index.json"
+            if not index_path.is_file():
+                continue
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            missing_shards = sorted({
+                shard
+                for shard in index["weight_map"].values()
+                if not (snapshot / shard).is_file()
+            })
+            if not missing_shards:
+                videoalign_base_path = str(snapshot.resolve())
+                break
+            missing_by_snapshot[str(snapshot)] = missing_shards
+        if not videoalign_base_path:
+            raise FileNotFoundError(
+                "No complete prepared Qwen2-VL snapshot was found under "
+                f"{snapshots_root}; missing={missing_by_snapshot}"
+            )
+        os.environ["VIDEOALIGN_BASE_MODEL_PATH"] = videoalign_base_path
+        print(
+            f"Using read-only VideoAlign base snapshot: {videoalign_base_path}",
+            flush=True,
+        )
+    # Importing FastVideo can load Triton-backed fastvideo-kernel modules.
+    # Modal image builders do not expose a GPU driver, so run the focused
+    # collection/import gates here after the H100 allocation instead.
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "fastvideo/tests/train/methods/test_finite_transition_posterior_core.py",
+            "fastvideo/tests/train/methods/test_finite_transition_posterior_method.py",
+            "fastvideo/tests/train/methods/test_finite_transition_posterior_repro.py",
+            "fastvideo/tests/train/methods/test_local_asfmc.py",
+            "fastvideo/tests/train/methods/test_videoalign_rewards.py::test_videoalign_can_use_prepared_local_base_model",
+            "fastvideo/tests/training/distill/test_anyflow_pretrain.py::test_embedder_materializes_gate_after_meta_initialization",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    for module in (
+        "examples.train.prepare_finite_transition_posterior_assets",
+        "examples.train.check_finite_transition_posterior_environment",
+    ):
+        subprocess.run(
+            [sys.executable, "-m", module, "--help"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from fastvideo.train.methods.rl.rewards.hpsv3 import "
+            "_patch_hpsv3_state_dict_loader, _patch_transformers_video_input_alias; "
+            "_patch_transformers_video_input_alias(); "
+            "_patch_hpsv3_state_dict_loader(); "
+            "from fastvideo.train.methods.rl.rewards.videoalign import "
+            "_patch_videoalign_modules; _patch_videoalign_modules(); "
+            "print('reward runtimes ok')",
+        ],
+        cwd=repo,
+        check=True,
+    )
 
     preflight_cmd = [
         sys.executable,
@@ -262,6 +325,9 @@ def train(
         stderr=sys.stderr,
         check=True,
     )
+    # Preserve the warmed AnyFlow snapshot even if a later reward or
+    # preprocessing preflight fails and the function exits with an error.
+    cache_volume.commit()
 
     prep_cmd = [
         sys.executable,
@@ -500,11 +566,32 @@ def main(
         run_kwargs["prepare_only"] = False
         run_kwargs["skip_preprocess"] = True
         run_kwargs["run_name_override"] = ""
-        train.spawn(objective="posterior_projection", **run_kwargs)
-        train.spawn(objective="flowmap_grpo", **run_kwargs)
+        calls = {
+            "posterior_projection": train.spawn(
+                objective="posterior_projection",
+                **run_kwargs,
+            ),
+            "flowmap_grpo": train.spawn(
+                objective="flowmap_grpo",
+                **run_kwargs,
+            ),
+        }
         print(
-            f"Spawned paired FTPP/GRPO jobs in W&B group {comparison_id!r}.",
+            f"Started paired FTPP/GRPO jobs in W&B group {comparison_id!r}.",
             flush=True,
         )
+        results = {}
+        errors = {}
+        for objective_name, call in calls.items():
+            try:
+                results[objective_name] = call.get()
+            except Exception as exc:
+                errors[objective_name] = repr(exc)
+        if errors:
+            raise RuntimeError(
+                f"Paired run failures: {errors!r}; completed: {results!r}"
+            )
+        print(f"Paired run completed: {results!r}", flush=True)
         return
-    train.spawn(objective=objective, **kwargs)
+    result = train.remote(objective=objective, **kwargs)
+    print(f"Run completed: {result!r}", flush=True)

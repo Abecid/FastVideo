@@ -4,12 +4,35 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
 
 from fastvideo.train.methods.rl.rewards import videoalign
+
+
+def test_videoalign_can_use_prepared_local_base_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed = {}
+
+    def create_model_and_processor(*, model_config, **_kwargs):
+        observed["path"] = model_config.model_name_or_path
+        return "model", "processor", None
+
+    inference_mod = SimpleNamespace(
+        create_model_and_processor=create_model_and_processor
+    )
+    videoalign._patch_videoalign_base_model_path(inference_mod)
+    monkeypatch.setenv("VIDEOALIGN_BASE_MODEL_PATH", str(tmp_path))
+
+    model_config = SimpleNamespace(model_name_or_path="Qwen/remote")
+    inference_mod.create_model_and_processor(model_config=model_config)
+
+    assert observed["path"] == str(tmp_path)
 
 
 class _FakeInferencer:

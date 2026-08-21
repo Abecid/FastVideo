@@ -89,6 +89,7 @@ class WanTimeTextImageEmbedding(nn.Module):
         self._r_embedder_enabled = bool(r_embedder)
         self._r_embedder_fusion = r_embedder_fusion
         self._r_embedder_deltatime_type = r_embedder_deltatime_type
+        self._r_embedder_gate_value = float(r_embedder_gate_value)
         if self._r_embedder_enabled:
             if r_embedder_fusion not in ("additive", "gated"):
                 raise ValueError(
@@ -109,6 +110,20 @@ class WanTimeTextImageEmbedding(nn.Module):
             )
         else:
             self.delta_embedder = None
+
+    def materialize_non_persistent_buffers(
+        self,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        """Rebuild buffers omitted from checkpoints after meta initialization."""
+        gate = getattr(self, "_r_embedder_gate", None)
+        if isinstance(gate, torch.Tensor) and gate.is_meta:
+            self._buffers["_r_embedder_gate"] = torch.tensor(
+                self._r_embedder_gate_value,
+                device=device,
+                dtype=dtype,
+            )
 
     def forward(
         self,
@@ -681,6 +696,16 @@ class WanTransformer3DModel(BaseDiT):
 
         self.gradient_checkpointing = False
         self.__post_init__()
+
+    def materialize_non_persistent_buffers(
+        self,
+        device: torch.device,
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        self.condition_embedder.materialize_non_persistent_buffers(
+            device=device,
+            dtype=dtype,
+        )
 
     def forward(self,
                 hidden_states: torch.Tensor,
