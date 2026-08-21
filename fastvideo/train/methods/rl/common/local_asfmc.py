@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Local-anchor ASFMC math for reverse-time rectified-flow maps.
 
-Flow-Map GRPO recommends a local anchor for two-time maps such as MeanFlow:
-after a long deterministic transition to the policy target, move a short
-additional distance toward the data endpoint, then sample back through the
-short reverse-SDE Gaussian. AnyFlow uses the reverse convention ``q=1`` at
-Gaussian noise and ``q=0`` at data, while the paper uses ``s=1-q``. The helper
-below performs that coordinate conversion explicitly.
+Flow-Map GRPO derives a short-interval Gaussian policy for two-time flow maps.
+AnyFlow uses the reverse coordinate ``q`` (noise at 1, data at 0), whereas the
+paper uses ``s = 1-q`` (noise at 0, data at 1). This module performs that
+coordinate and velocity-sign conversion explicitly.
 """
 
 from __future__ import annotations
@@ -17,50 +15,38 @@ import torch
 
 
 def local_anchor_gaussian_parameters(
-    anchor_state: torch.Tensor,
+    target_state: torch.Tensor,
     instantaneous_reverse_velocity: torch.Tensor,
-    anchor_timestep: torch.Tensor | float,
+    target_timestep: torch.Tensor | float,
     *,
     num_train_timesteps: int,
     delta_fraction: float,
     noise_scale: float,
     terminal_base_sigma: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the local-anchor Gaussian mean and standard deviation.
+    """Return the local-anchor ASFMC Gaussian at the policy target time.
 
-    Args:
-        anchor_state: State at the short anchor time, in FastVideo's reverse
-            convention (noise time decreases toward zero during generation).
-        instantaneous_reverse_velocity: ``dX/dq`` predicted at the anchor. The
-            Flow-Map-GRPO paper writes velocity in the opposite coordinate
-            ``s=1-q``, so its instantaneous velocity is ``-dX/dq``.
-        anchor_timestep: Absolute reverse-time model timestep of the anchor.
-        num_train_timesteps: Usually 1000 for Wan.
-        delta_fraction: Short anchor interval in normalized time; the paper's
-            released MeanFlow setting uses 0.03.
-        noise_scale: Positive local reverse-SDE stochasticity coefficient; the
-            released Flow-Map-GRPO setting uses 0.7.
-        terminal_base_sigma: Lower bound for the paper-coordinate data
-            coefficient. It stabilizes the first near-noise transition; the
-            released setting is 0.05.
+    Flow-Map GRPO writes the affine path in a coordinate ``s`` that increases
+    from noise to data. For ``a_s=s`` and a local anchor ``tau=s+delta``, its
+    two-time policy is, up to the local Euler--Maruyama error,
 
-    For the rectified path in the paper coordinate ``s``,
+        mean_s = x_s - delta * lambda^2 * (x_s / s - u_s(x_s))
+        std_s  = lambda * sqrt(2 * (1-s) / s) * sqrt(delta).
 
-        sigma(s) = lambda * sqrt(2 * (1-s) / s).
+    FastVideo/AnyFlow uses ``q=1-s`` and predicts
+    ``v_q=dX/dq=-u_s``. Substitution therefore gives
 
-    The short reverse conditional has, to first order,
+        mean_q = x_q - delta * lambda^2 * (x_q / (1-q) + v_q(x_q))
+        std_q  = lambda * sqrt(2 * q / (1-q)) * sqrt(delta).
 
-        mean = x_tau - delta * [(1-lambda^2) u_tau
-                                + lambda^2 x_tau / tau]
-
-    with ``u_tau = -v_reverse``. The returned standard deviation is
-    ``sigma(tau) * sqrt(delta)``. The approximation error is the local-anchor
-    discretization error; no long-range Gaussian approximation is made.
+    ``terminal_base_sigma`` lower-bounds ``1-q`` near the initial noise
+    endpoint, matching the stabilizing terminal coefficient used by the
+    released Flow-Map-GRPO configuration.
     """
-    if anchor_state.shape != instantaneous_reverse_velocity.shape:
+    if target_state.shape != instantaneous_reverse_velocity.shape:
         raise ValueError(
-            "anchor_state and instantaneous_reverse_velocity must have equal "
-            f"shapes, got {anchor_state.shape} and "
+            "target_state and instantaneous_reverse_velocity must have equal "
+            f"shapes, got {target_state.shape} and "
             f"{instantaneous_reverse_velocity.shape}"
         )
     if num_train_timesteps <= 0:
@@ -73,38 +59,34 @@ def local_anchor_gaussian_parameters(
         raise ValueError("terminal_base_sigma must lie in (0, 1)")
 
     reverse_time = torch.as_tensor(
-        anchor_timestep,
-        device=anchor_state.device,
+        target_timestep,
+        device=target_state.device,
         dtype=torch.float32,
     ) / float(num_train_timesteps)
     if torch.any((reverse_time < 0.0) | (reverse_time >= 1.0)):
         raise ValueError(
-            "local anchor reverse time must lie in [0, 1); got "
-            f"{anchor_timestep!r}"
+            "local-anchor reverse target time must lie in [0, 1); got "
+            f"{target_timestep!r}"
         )
 
     paper_time = 1.0 - reverse_time
     stabilized_time = paper_time.clamp_min(float(terminal_base_sigma))
-    while stabilized_time.ndim < anchor_state.ndim:
+    while stabilized_time.ndim < target_state.ndim:
         stabilized_time = stabilized_time.unsqueeze(-1)
-    while reverse_time.ndim < anchor_state.ndim:
+    while reverse_time.ndim < target_state.ndim:
         reverse_time = reverse_time.unsqueeze(-1)
 
     lambda_sq = float(noise_scale) ** 2
     delta = float(delta_fraction)
-    mean = (
-        anchor_state
-        + delta * (1.0 - lambda_sq) * instantaneous_reverse_velocity
-        - delta * lambda_sq * anchor_state / stabilized_time.to(anchor_state.dtype)
+    mean = target_state - delta * lambda_sq * (
+        target_state / stabilized_time.to(target_state.dtype)
+        + instantaneous_reverse_velocity
     )
-
     sigma = float(noise_scale) * torch.sqrt(
-        2.0
-        * reverse_time
-        / stabilized_time
+        2.0 * reverse_time / stabilized_time
     )
-    std = sigma.to(anchor_state.dtype) * math.sqrt(delta)
-    return mean.to(anchor_state.dtype), std
+    std = sigma.to(target_state.dtype) * math.sqrt(delta)
+    return mean.to(target_state.dtype), std
 
 
 __all__ = ["local_anchor_gaussian_parameters"]
