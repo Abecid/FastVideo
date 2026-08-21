@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fail-fast preflight for the AnyFlow finite-transition experiment.
 
-The check intentionally downloads only small repository metadata/config files.
-The actual model weights, text embeddings, reward checkpoint and parquet data are
-materialized by the normal preparation/training path and cached on Modal volumes.
+The check validates the released two-time checkpoint, the resolved FastVideo
+configuration, the prompt source and credentials.  With ``--download-model`` it
+also warms the full Hugging Face snapshot into the mounted Modal cache before a
+paired training launch, avoiding simultaneous multi-job model downloads.
 """
 
 from __future__ import annotations
@@ -103,6 +104,30 @@ def check_anyflow_model_contract(model_id: str) -> dict[str, Any]:
     }
 
 
+def warm_model_snapshot(model_id: str) -> dict[str, Any]:
+    """Download the complete checkpoint into the configured HF cache."""
+    from huggingface_hub import snapshot_download
+
+    snapshot = Path(
+        snapshot_download(
+            repo_id=model_id,
+            max_workers=8,
+        )
+    )
+    transformer_dir = snapshot / "transformer"
+    weight_files = sorted(transformer_dir.glob("*.safetensors"))
+    if not weight_files:
+        raise RuntimeError(
+            f"Downloaded snapshot {snapshot} does not contain transformer weights"
+        )
+    total_weight_bytes = sum(path.stat().st_size for path in weight_files)
+    return {
+        "snapshot_path": str(snapshot),
+        "transformer_weight_files": len(weight_files),
+        "transformer_weight_bytes": int(total_weight_bytes),
+    }
+
+
 def check_fastvideo_config(config_path: Path) -> dict[str, Any]:
     cfg = load_run_config(str(config_path))
     method_target = str(cfg.method["_target_"])
@@ -184,10 +209,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path(DEFAULT_CONFIG))
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
     parser.add_argument("--dataset", default="world-r1-enhanced-dynamic")
-    parser.add_argument("--diffusion-nft-root", type=Path, default=Path(".cache/DiffusionNFT"))
+    parser.add_argument(
+        "--diffusion-nft-root",
+        type=Path,
+        default=Path(".cache/DiffusionNFT"),
+    )
     parser.add_argument("--validation-prompts", type=int, default=64)
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--require-wandb", action="store_true")
+    parser.add_argument("--download-model", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     args.repo_root = args.repo_root.resolve()
@@ -204,9 +234,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    summary = {
+    model_summary = check_anyflow_model_contract(args.model_id)
+    summary: dict[str, Any] = {
         "credentials": check_credentials(require_wandb=args.require_wandb),
-        "model": check_anyflow_model_contract(args.model_id),
+        "model": model_summary,
         "config": check_fastvideo_config(args.config),
         "prompts": check_prompt_source(
             args.dataset,
@@ -215,6 +246,8 @@ def main() -> None:
             num_gpus=args.num_gpus,
         ),
     }
+    if args.download_model:
+        summary["model_cache"] = warm_model_snapshot(args.model_id)
     print("Finite-transition posterior preflight passed:")
     print(json.dumps(summary, indent=2, sort_keys=True))
     if args.json:
