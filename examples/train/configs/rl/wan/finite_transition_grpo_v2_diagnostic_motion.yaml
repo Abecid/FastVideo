@@ -1,10 +1,8 @@
-# Easy systems-identification reward for the finite-transition RL substrate.
+# Optional systems-identification reward for the finite-transition RL substrate.
 #
-# This is not a publishable quality objective. It asks whether the stochastic
-# rollout, likelihood, gradients and deterministic four-step map can move at all
-# under a direct measurable signal: decoded adjacent-frame L1 motion. Do not run
-# the expensive VideoAlign comparison until this short gate shows that raw and
-# EMA deterministic validation respond in the expected direction without NaNs.
+# This is not a quality objective. It asks whether the stochastic rollout,
+# likelihood, gradients, and deterministic four-step map can increase decoded
+# adjacent-frame L1 motion. Run the cheaper luminance gate first.
 
 models:
   student:
@@ -25,7 +23,7 @@ models:
         - ffn.fc_out
 
 method:
-  _target_: fastvideo.train.methods.rl.finite_transition_v2.FiniteTransitionV2Method
+  _target_: fastvideo.train.methods.rl.finite_transition_v2_final.FiniteTransitionV2FinalMethod
   objective: flowmap_grpo
   v2_objective: flowmap_grpo
   require_train_eval_schedule_match: false
@@ -33,7 +31,7 @@ method:
   eval_map_steps: 4
   stochastic_steps: 4
   transition_mode: all
-  group_size: 4
+  group_size: 8
   rollout_groups_per_update: 4
   behavior_policy: on_policy
 
@@ -48,7 +46,7 @@ method:
   initial_reward_std: 0.01
   advantage_clip: 5.0
   advantage_epsilon: 0.000001
-  clip_range: 0.001
+  clip_range: 0.02
 
   target_post_update_kl: 0.00003
   kl_controller_rate: 0.25
@@ -63,28 +61,32 @@ method:
   target_ess_ratio: 0.50
   reward_bisection_steps: 40
 
+  # Temporal L1 is the actual training coefficient. MQ is evaluated online only
+  # as a safety diagnostic; VQ and TA remain held out until validation.
   reward_backend: genrl
-  # VideoAlign is still logged as a safety diagnostic, but temporal L1 is the
-  # actual training reward in this short learnability test.
-  optimize_reward: videoalign_mq
+  optimize_reward: videoalign_mq_audited
   diagnostic_reward: temporal_l1
   reward_fn:
     rewards:
-      videoalign_mq: 1.0
-      videoalign_vq: 1.0
-      videoalign_ta: 1.0
+      videoalign_mq_audited: 1.0
+  validation_reward_backend: genrl
+  validation_reward_fn:
+    rewards:
+      videoalign_mq_audited: 1.0
+      videoalign_vq_audited: 1.0
+      videoalign_ta_audited: 1.0
 
   videoalign_audit:
     enabled: true
     minimum_checkpoint_numel_coverage: 0.97
     minimum_component_coverage: 0.95
-    require_reward_head: false
+    require_reward_head: true
     repeatability_tolerance: 0.000001
 
   validation:
     every_steps: 5
     num_steps: 4
-    num_prompts: 32
+    num_prompts: 64
     batch_size: 1
     log_samples: true
     max_samples: 8
@@ -95,15 +97,15 @@ method:
   validate_raw_model: true
   validate_ema_model: true
   evaluation:
-    samples_per_prompt: 1
+    samples_per_prompt: 2
     static_temporal_l1_threshold: 0.01
     primary_min_delta: 0.0
     significance_z: 0.0
     min_motion_ratio: 0.90
     min_latent_diversity_ratio: 0.70
     heldout_max_drop:
-      videoalign_vq: 0.05
-      videoalign_ta: 0.05
+      videoalign_vq_audited: 0.05
+      videoalign_ta_audited: 0.05
 
   ema:
     enabled: true
@@ -126,7 +128,7 @@ training:
     data_path: data/finite_transition_posterior/train/combined_parquet_dataset
     preprocessed_data_type: text_only
     dataloader_num_workers: 0
-    train_batch_size: 1
+    train_batch_size: 2
     training_cfg_rate: 0.0
     seed: 42
     num_latent_t: 21
