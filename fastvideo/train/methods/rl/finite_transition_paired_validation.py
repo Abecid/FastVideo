@@ -24,7 +24,7 @@ from fastvideo.train.methods.rl.finite_transition_posterior import (
 
 
 class PairedFiniteTransitionValidationMixin:
-    """Adds raw/EMA paired validation and per-prompt JSON artifacts."""
+    """Adds raw/EMA validation with exact fixed prompt-seed pairing."""
 
     def _paired_validation_state(self) -> dict[str, Any]:
         if not hasattr(self, "_paired_validation_baselines"):
@@ -69,19 +69,37 @@ class PairedFiniteTransitionValidationMixin:
             device=self.student.device,
         )
         items = self._get_validation_items()
-        local_metrics: dict[str, list[torch.Tensor]] = defaultdict(list)
-        local_masks: list[torch.Tensor] = []
-        local_indices: list[torch.Tensor] = []
+
+        local_sample_metrics: dict[str, list[torch.Tensor]] = defaultdict(list)
+        local_prompt_metrics: dict[str, list[torch.Tensor]] = defaultdict(list)
+        local_sample_masks: list[torch.Tensor] = []
+        local_prompt_masks: list[torch.Tensor] = []
+        local_sample_keys: list[torch.Tensor] = []
+        local_prompt_indices: list[torch.Tensor] = []
+        local_sample_seeds: list[torch.Tensor] = []
         local_logs: list[dict[str, Any]] = []
 
         for start in range(0, len(items), config.batch_size):
             batch_items = items[start : start + config.batch_size]
             repeated_rows: list[dict[str, Any]] = []
-            expanded_meta: list[tuple[int, bool]] = []
+            expanded_meta: list[tuple[int, bool, int, int]] = []
             for global_index, valid, row in batch_items:
-                for _ in range(self._validation_samples_per_prompt):
+                for seed_offset in range(self._validation_samples_per_prompt):
                     repeated_rows.append(copy.deepcopy(row))
-                    expanded_meta.append((global_index, valid))
+                    sample_seed = (
+                        int(config.seed)
+                        + int(global_index) * 10_000
+                        + int(seed_offset)
+                    )
+                    expanded_meta.append(
+                        (
+                            int(global_index),
+                            bool(valid),
+                            int(seed_offset),
+                            int(sample_seed),
+                        )
+                    )
+
             raw_batch = self._collate_rows(repeated_rows)
             prepare_generator = torch.Generator(
                 device=self.student.device
@@ -99,17 +117,10 @@ class PairedFiniteTransitionValidationMixin:
                 raise RuntimeError("validation batch is missing latent shape")
 
             noises = []
-            for sample_index, (global_index, _valid) in enumerate(
-                expanded_meta
-            ):
-                seed = (
-                    int(config.seed)
-                    + int(global_index) * 10_000
-                    + sample_index % self._validation_samples_per_prompt
-                )
+            for _global_index, _valid, _offset, sample_seed in expanded_meta:
                 generator = torch.Generator(
                     device=self.student.device
-                ).manual_seed(seed)
+                ).manual_seed(sample_seed)
                 noises.append(
                     torch.randn(
                         (1, *batch.latents.shape[1:]),
@@ -119,43 +130,55 @@ class PairedFiniteTransitionValidationMixin:
                     )
                 )
             initial = torch.cat(noises, dim=0)
-            endpoint = self._deterministic_rollout(
-                initial,
-                batch,
-                schedule,
-            )
+            endpoint = self._deterministic_rollout(initial, batch, schedule)
             media = self.student.decode_latents(endpoint).detach().cpu()
             rewards = self._score_media(media, prompts)
-            motion = temporal_l1(media)
+            motion = temporal_l1(media).to(self.student.device)
 
             item_count = len(batch_items)
             samples_per_prompt = self._validation_samples_per_prompt
-            valid_mask = torch.tensor(
+            prompt_valid = torch.tensor(
                 [bool(item[1]) for item in batch_items],
                 device=self.student.device,
                 dtype=torch.bool,
             )
-            prompt_indices = torch.tensor(
+            prompt_index = torch.tensor(
                 [int(item[0]) for item in batch_items],
                 device=self.student.device,
                 dtype=torch.long,
             )
-            local_masks.append(valid_mask)
-            local_indices.append(prompt_indices)
+            sample_valid = torch.tensor(
+                [bool(meta[1]) for meta in expanded_meta],
+                device=self.student.device,
+                dtype=torch.bool,
+            )
+            sample_seed = torch.tensor(
+                [int(meta[3]) for meta in expanded_meta],
+                device=self.student.device,
+                dtype=torch.long,
+            )
+            sample_key = torch.tensor(
+                [
+                    int(meta[0]) * 1_000_000 + int(meta[2])
+                    for meta in expanded_meta
+                ],
+                device=self.student.device,
+                dtype=torch.long,
+            )
+            local_prompt_masks.append(prompt_valid)
+            local_prompt_indices.append(prompt_index)
+            local_sample_masks.append(sample_valid)
+            local_sample_keys.append(sample_key)
+            local_sample_seeds.append(sample_seed)
 
             for name, value in rewards.items():
-                grouped = value.reshape(item_count, samples_per_prompt)
-                local_metrics[f"reward/{name}"].append(grouped.mean(dim=1))
-            local_metrics["temporal_l1"].append(
-                motion.to(self.student.device)
-                .reshape(item_count, samples_per_prompt)
-                .mean(dim=1)
+                local_sample_metrics[f"reward/{name}"].append(
+                    value.to(self.student.device).reshape(-1)
+                )
+            local_sample_metrics["temporal_l1"].append(motion.reshape(-1))
+            local_sample_metrics["static_sample"].append(
+                (motion < self._static_temporal_threshold).float()
             )
-            static = (
-                motion.to(self.student.device)
-                < self._static_temporal_threshold
-            ).float().reshape(item_count, samples_per_prompt).mean(dim=1)
-            local_metrics["static_sample_ratio"].append(static)
 
             latent_diversity = []
             video_diversity = []
@@ -164,10 +187,10 @@ class PairedFiniteTransitionValidationMixin:
                 hi = lo + samples_per_prompt
                 latent_diversity.append(mean_pairwise_rms(endpoint[lo:hi]))
                 video_diversity.append(mean_pairwise_rms(media[lo:hi]))
-            local_metrics["latent_diversity_rms"].append(
+            local_prompt_metrics["prompt/latent_diversity_rms"].append(
                 torch.stack(latent_diversity).to(self.student.device)
             )
-            local_metrics["video_diversity_rms"].append(
+            local_prompt_metrics["prompt/video_diversity_rms"].append(
                 torch.stack(video_diversity).to(self.student.device)
             )
 
@@ -196,30 +219,46 @@ class PairedFiniteTransitionValidationMixin:
                         entry["mode"] = mode
                         local_logs.append(entry)
 
-        if not local_masks:
+        if not local_sample_masks or not local_prompt_masks:
             return {}, {}, []
 
-        mask = self._all_gather_1d(
-            torch.cat(local_masks).float()
+        sample_mask = self._all_gather_1d(
+            torch.cat(local_sample_masks).float()
         ).bool()
-        indices = self._all_gather_1d(
-            torch.cat(local_indices).float()
-        ).long()
-        valid_indices = indices[mask]
-        order = torch.argsort(valid_indices)
+        sample_keys = self._all_gather_1d(
+            torch.cat(local_sample_keys).float()
+        ).long()[sample_mask]
+        sample_seeds = self._all_gather_1d(
+            torch.cat(local_sample_seeds).float()
+        ).long()[sample_mask]
+        sample_order = torch.argsort(sample_keys)
+
+        prompt_mask = self._all_gather_1d(
+            torch.cat(local_prompt_masks).float()
+        ).bool()
+        prompt_indices = self._all_gather_1d(
+            torch.cat(local_prompt_indices).float()
+        ).long()[prompt_mask]
+        prompt_order = torch.argsort(prompt_indices)
 
         scalars: dict[str, torch.Tensor] = {}
         vectors: dict[str, list[float]] = {
+            "sample_key": [
+                float(value) for value in sample_keys[sample_order].cpu()
+            ],
+            "sample_seed": [
+                float(value) for value in sample_seeds[sample_order].cpu()
+            ],
             "prompt_index": [
-                float(value)
-                for value in valid_indices[order].cpu()
-            ]
+                float(value) for value in prompt_indices[prompt_order].cpu()
+            ],
         }
-        for name, chunks in local_metrics.items():
+
+        for name, chunks in local_sample_metrics.items():
             gathered = self._all_gather_1d(
                 torch.cat(chunks).to(self.student.device).float()
             )
-            values = gathered[mask][order]
+            values = gathered[sample_mask][sample_order]
             if values.numel() == 0:
                 continue
             scalars[f"{mode}/{name}"] = values.mean()
@@ -230,7 +269,23 @@ class PairedFiniteTransitionValidationMixin:
             )
             vectors[name] = [float(value) for value in values.cpu()]
 
-        scalars[f"{mode}/num_prompts"] = mask.sum().float()
+        for name, chunks in local_prompt_metrics.items():
+            gathered = self._all_gather_1d(
+                torch.cat(chunks).to(self.student.device).float()
+            )
+            values = gathered[prompt_mask][prompt_order]
+            if values.numel() == 0:
+                continue
+            scalars[f"{mode}/{name}"] = values.mean()
+            scalars[f"{mode}_std/{name}"] = values.std(unbiased=False)
+            scalars[f"{mode}_sem/{name}"] = (
+                values.std(unbiased=False)
+                / math.sqrt(float(values.numel()))
+            )
+            vectors[name] = [float(value) for value in values.cpu()]
+
+        scalars[f"{mode}/num_prompt_seed_pairs"] = sample_mask.sum().float()
+        scalars[f"{mode}/num_prompts"] = prompt_mask.sum().float()
         scalars[f"{mode}/samples_per_prompt"] = torch.tensor(
             float(self._validation_samples_per_prompt),
             device=self.student.device,
@@ -247,16 +302,25 @@ class PairedFiniteTransitionValidationMixin:
         baselines = self._paired_validation_state()
         if mode not in baselines:
             baselines[mode] = {
-                key: list(values)
-                for key, values in vectors.items()
+                key: list(values) for key, values in vectors.items()
             }
-            return {
-                f"paired_{mode}/baseline_initialized": 1.0,
-            }
+            return {f"paired_{mode}/baseline_initialized": 1.0}
+
+        for identity_key in ("sample_key", "sample_seed", "prompt_index"):
+            current_identity = vectors.get(identity_key)
+            baseline_identity = baselines[mode].get(identity_key)
+            if (
+                current_identity is not None
+                and baseline_identity is not None
+                and current_identity != baseline_identity
+            ):
+                raise RuntimeError(
+                    f"paired validation identity changed for {identity_key}"
+                )
 
         metrics: dict[str, LogScalar] = {}
         for name, current in vectors.items():
-            if name == "prompt_index":
+            if name in {"sample_key", "sample_seed", "prompt_index"}:
                 continue
             baseline = baselines[mode].get(name)
             if baseline is None or len(baseline) != len(current):
@@ -324,16 +388,14 @@ class PairedFiniteTransitionValidationMixin:
             and ci_lower > 0.0
         )
 
+        baseline_state = self._paired_validation_state().get("ema", {})
         motion_delta = float(
             metrics.get(
                 "paired_ema/temporal_l1/mean_delta",
                 float("nan"),
             )
         )
-        baseline_motion = self._paired_validation_state().get(
-            "ema",
-            {},
-        ).get("temporal_l1", [])
+        baseline_motion = baseline_state.get("temporal_l1", [])
         baseline_motion_mean = (
             sum(baseline_motion) / len(baseline_motion)
             if baseline_motion
@@ -347,16 +409,14 @@ class PairedFiniteTransitionValidationMixin:
             else float("nan")
         )
 
+        diversity_key = "prompt/latent_diversity_rms"
         diversity_delta = float(
             metrics.get(
-                "paired_ema/latent_diversity_rms/mean_delta",
+                f"paired_ema/{diversity_key}/mean_delta",
                 float("nan"),
             )
         )
-        baseline_diversity = self._paired_validation_state().get(
-            "ema",
-            {},
-        ).get("latent_diversity_rms", [])
+        baseline_diversity = baseline_state.get(diversity_key, [])
         baseline_diversity_mean = (
             sum(baseline_diversity) / len(baseline_diversity)
             if baseline_diversity
@@ -369,6 +429,7 @@ class PairedFiniteTransitionValidationMixin:
             and math.isfinite(baseline_diversity_mean)
             else float("nan")
         )
+
         heldout_success = True
         for reward_name, max_drop in self._heldout_max_drop.items():
             delta = float(
@@ -435,8 +496,7 @@ class PairedFiniteTransitionValidationMixin:
             log_samples=False,
         )
         raw_metrics: dict[str, LogScalar] = {
-            f"validation_{key}": value
-            for key, value in raw_scalars.items()
+            f"validation_{key}": value for key, value in raw_scalars.items()
         }
         raw_metrics.update(
             self._paired_metrics(
@@ -460,8 +520,7 @@ class PairedFiniteTransitionValidationMixin:
                 )
             )
         ema_metrics: dict[str, LogScalar] = {
-            f"validation_{key}": value
-            for key, value in ema_scalars.items()
+            f"validation_{key}": value for key, value in ema_scalars.items()
         }
         ema_metrics.update(
             self._paired_metrics(
