@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compare two finite-transition validation artifacts with paired statistics.
+"""Compare two exact finite-transition validation artifacts.
 
-Each input is a JSON file produced under
-``<output_dir>/paired_validation/step_XXXXXX_{raw,ema}.json``. The tool verifies
-that prompt/seed identities match before computing left-minus-right bootstrap
-confidence intervals for every shared scalar metric.
+The tool verifies literal prompt/seed identity, computes left-minus-right values
+for every sample, averages fixed seeds within each prompt, and bootstraps prompts.
+This avoids treating multiple seeds from one prompt as independent evidence.
 """
 
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import json
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,26 @@ def load_artifact(path: Path) -> dict[str, Any]:
     return raw
 
 
+def _prompt_means(
+    values: list[float],
+    prompt_indices: list[int | float],
+) -> torch.Tensor:
+    if len(values) != len(prompt_indices):
+        raise ValueError("metric and prompt-index vectors have different lengths")
+    grouped: dict[int, list[float]] = defaultdict(list)
+    for prompt_index, value in zip(prompt_indices, values, strict=True):
+        grouped[int(prompt_index)].append(float(value))
+    if len(grouped) < 2:
+        raise ValueError("cross-arm comparison requires at least two prompts")
+    return torch.tensor(
+        [
+            sum(grouped[index]) / len(grouped[index])
+            for index in sorted(grouped)
+        ],
+        dtype=torch.float64,
+    )
+
+
 def compare(
     left: dict[str, Any],
     right: dict[str, Any],
@@ -46,8 +66,14 @@ def compare(
                     f"paired objective artifacts disagree on {key}"
                 )
 
+    prompt_indices = left_metrics.get("prompt_index")
+    if not isinstance(prompt_indices, list):
+        raise ValueError("exact artifacts must contain sample-level prompt_index")
+
     summaries: dict[str, dict[str, float]] = {}
-    for name in sorted(set(left_metrics) & set(right_metrics)):
+    for metric_offset, name in enumerate(
+        sorted(set(left_metrics) & set(right_metrics))
+    ):
         if name in IDENTITY_KEYS:
             continue
         left_values = left_metrics[name]
@@ -59,13 +85,18 @@ def compare(
             continue
         if len(left_values) != len(right_values) or len(left_values) < 2:
             continue
-        summaries[name] = paired_summary(
-            torch.tensor(left_values),
-            torch.tensor(right_values),
+        left_prompt = _prompt_means(left_values, prompt_indices)
+        right_prompt = _prompt_means(right_values, prompt_indices)
+        summary = paired_summary(
+            left_prompt,
+            right_prompt,
             bootstrap_samples=bootstrap_samples,
             confidence=confidence,
-            seed=seed,
+            seed=int(seed) + int(metric_offset),
         )
+        summary["sample_count"] = float(len(left_values))
+        summary["prompt_count"] = float(left_prompt.numel())
+        summaries[name] = summary
 
     return {
         "left_iteration": int(left.get("iteration", -1)),
@@ -73,6 +104,7 @@ def compare(
         "left_mode": left.get("mode"),
         "right_mode": right.get("mode"),
         "orientation": "left_minus_right",
+        "bootstrap_unit": "prompt",
         "metrics": summaries,
     }
 
