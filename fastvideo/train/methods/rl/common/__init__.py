@@ -21,14 +21,21 @@ from fastvideo.train.methods.rl.common.finite_transition import (
 from fastvideo.train.methods.rl.common.local_asfmc import (
     local_anchor_gaussian_parameters,
 )
+from fastvideo.train.methods.rl.common.prompt_sampling import (
+    KRepeatSample,
+    distributed_k_repeat_indices,
+)
+from fastvideo.train.methods.rl.common.reward_statistics import (
+    PromptRewardNormalizer,
+    RunningMoments,
+    TargetKLController,
+    paired_summary,
+    reward_softmax_weights,
+)
 from fastvideo.train.methods.rl.common.sampling import (
     DiffusionSampler,
     SamplingConfig,
     SamplingResult,
-)
-from fastvideo.train.methods.rl.common.prompt_sampling import (
-    KRepeatSample,
-    distributed_k_repeat_indices,
 )
 from fastvideo.train.methods.rl.common.validation import (
     RLValidationConfig,
@@ -40,9 +47,12 @@ from fastvideo.train.methods.rl.common.validation import (
 __all__ = [
     "DiffusionSampler",
     "KRepeatSample",
+    "PromptRewardNormalizer",
     "RLValidationConfig",
+    "RunningMoments",
     "SamplingConfig",
     "SamplingResult",
+    "TargetKLController",
     "anyflow_inference_schedule",
     "append_data_endpoint",
     "clipped_grpo_loss",
@@ -54,7 +64,9 @@ __all__ = [
     "local_anchor_gaussian_parameters",
     "mean_pairwise_rms",
     "media_to_video_array",
+    "paired_summary",
     "posterior_projection_loss",
+    "reward_softmax_weights",
     "reward_tilted_weights",
     "sample_diagonal_gaussian",
     "temporal_l1",
