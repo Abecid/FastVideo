@@ -1,11 +1,11 @@
 # Posterior-mean finite-velocity regression for AnyFlow-Wan.
 #
-# This is the stronger follow-up when likelihood-based FTPP and one-update GRPO
-# remain tied. Four counterfactual actions branch from one shared deployed
+# This is the distinct follow-up when likelihood-based posterior weighting and
+# GRPO remain tied. Eight counterfactual actions branch from one shared deployed
 # transition. Their reward posterior defines a centered finite-velocity
-# correction, which is added to the frozen behavior transition and used as an
-# ordinary stopped regression target. The method therefore trains the exact
-# deterministic transition used at four-step inference.
+# correction, which is added to the frozen behavior transition and used as a
+# stopped regression target. The method therefore changes the deterministic
+# finite map used at four-step inference directly.
 
 models:
   student:
@@ -26,19 +26,18 @@ models:
         - ffn.fc_out
 
 method:
-  _target_: fastvideo.train.methods.rl.finite_transition_v2.FiniteTransitionV2Method
+  _target_: fastvideo.train.methods.rl.finite_transition_v2_final.FiniteTransitionV2FinalMethod
   objective: posterior_projection
   v2_objective: finite_velocity_regression
 
-  # Directly correct one of the deployed four-step transitions. The frozen-base
-  # behavior makes separate objective runs consume literally identical rollout
-  # actions/rewards for a strict update-rule comparison.
+  # Directly correct one deployed four-step transition. Frozen-base behavior
+  # keeps candidate actions and terminal rewards reproducible across runs.
   require_train_eval_schedule_match: true
   train_map_steps: 4
   eval_map_steps: 4
   stochastic_steps: 3
   transition_mode: single
-  group_size: 4
+  group_size: 8
   rollout_groups_per_update: 4
   behavior_policy: frozen_base
 
@@ -57,8 +56,8 @@ method:
   target_ess_ratio: 0.50
   reward_bisection_steps: 40
 
-  # Bound the actual deterministic next-state correction instead of relying on
-  # an arbitrary coefficient or learning-rate scale.
+  # Bound the actual deterministic next-state correction rather than relying on
+  # a raw reward coefficient or arbitrary policy-gradient norm.
   velocity_correction_scale: 1.0
   velocity_target_state_shift_rms: 0.01
   target_post_update_kl: 0.0
@@ -67,25 +66,29 @@ method:
   maximum_loss_scale: 100.0
   max_grad_norm: 1.0
 
-  clip_range: 0.001
+  clip_range: 0.02
   advantage_clip: 5.0
   advantage_epsilon: 0.0001
   post_update_probe_every: 1
 
   reward_backend: genrl
-  optimize_reward: videoalign_mq
+  optimize_reward: videoalign_mq_audited
   diagnostic_reward: none
   reward_fn:
     rewards:
-      videoalign_mq: 1.0
-      videoalign_vq: 1.0
-      videoalign_ta: 1.0
+      videoalign_mq_audited: 1.0
+  validation_reward_backend: genrl
+  validation_reward_fn:
+    rewards:
+      videoalign_mq_audited: 1.0
+      videoalign_vq_audited: 1.0
+      videoalign_ta_audited: 1.0
 
   videoalign_audit:
     enabled: true
     minimum_checkpoint_numel_coverage: 0.97
     minimum_component_coverage: 0.95
-    require_reward_head: false
+    require_reward_head: true
     repeatability_tolerance: 0.000001
 
   validation:
@@ -102,15 +105,15 @@ method:
   validate_raw_model: true
   validate_ema_model: true
   evaluation:
-    samples_per_prompt: 1
+    samples_per_prompt: 2
     static_temporal_l1_threshold: 0.01
     primary_min_delta: 0.02
     significance_z: 1.96
     min_motion_ratio: 0.90
     min_latent_diversity_ratio: 0.80
     heldout_max_drop:
-      videoalign_vq: 0.02
-      videoalign_ta: 0.02
+      videoalign_vq_audited: 0.02
+      videoalign_ta_audited: 0.02
 
   ema:
     enabled: true
@@ -133,7 +136,7 @@ training:
     data_path: data/finite_transition_posterior/train/combined_parquet_dataset
     preprocessed_data_type: text_only
     dataloader_num_workers: 0
-    train_batch_size: 1
+    train_batch_size: 2
     training_cfg_rate: 0.0
     seed: 42
     num_latent_t: 21
