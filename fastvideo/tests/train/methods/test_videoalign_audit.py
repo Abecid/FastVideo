@@ -28,3 +28,14 @@ def test_checkpoint_audit_identifies_loaded_reward_head() -> None:
     assert summary["best_overall_coverage"] == 1.0
     assert summary["aggregate"]["head"]["total"] > 0
     assert summary["aggregate"]["head"]["coverage"] == 1.0
+
+
+def test_videoalign_prompt_semantics_match_upstream_heads() -> None:
+    prompts = ["a red car moves from left to right"]
+    mq = audit.AuditedVideoAlignMotionQualityScorer(device="cpu")
+    vq = audit.AuditedVideoAlignVisualQualityScorer(device="cpu")
+    ta = audit.AuditedVideoAlignTextAlignmentScorer(device="cpu")
+
+    assert mq._prompt(prompts, 0) == ""
+    assert vq._prompt(prompts, 0) == ""
+    assert ta._prompt(prompts, 0) == prompts[0]
