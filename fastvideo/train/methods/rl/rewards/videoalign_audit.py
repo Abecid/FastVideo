@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Audited VideoAlign reward wrappers.
+"""Audited and batched VideoAlign reward wrappers.
 
 The first finite-transition runs relied on compatibility key remapping between
 VideoAlign's Qwen2-VL checkpoint and a newer Transformers runtime. These wrappers
-record shape-compatible checkpoint coverage and fail before training if no
-reward head is demonstrably loaded.
+record shape-compatible checkpoint coverage, fail before training if no reward
+head is demonstrably loaded, and preserve upstream reward preprocessing:
+Motion Quality and Visual Quality use an empty text prompt, while Text Alignment
+uses the actual generation prompt.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from typing import Any
 import torch
 
 from fastvideo.train.methods.rl.rewards import videoalign as _videoalign
+from fastvideo.train.methods.rl.rewards.media import media_to_uint8_array
 
 _AUDIT_INSTALLED = False
 _AUDIT_REPORTS: list[dict[str, Any]] = []
@@ -188,9 +191,6 @@ def assert_videoalign_checkpoint_coverage(
             f"{head['coverage']:.4f} < {minimum_head:.4f}"
         )
 
-    # Checking every parameter in a multi-billion-parameter Qwen model would
-    # turn a fail-fast audit into another full model pass. Check every adapter
-    # and reward-head tensor plus a deterministic sample of base tensors.
     nonfinite = []
     sampled_base = 0
     for name, parameter in model.named_parameters():
@@ -216,31 +216,67 @@ class _AuditedScorerMixin:
     _coverage_checked = False
 
     @torch.no_grad()
-    def __call__(self, media: torch.Tensor, prompts):
+    def __call__(self, media: torch.Tensor, prompts) -> torch.Tensor:
         install_videoalign_coverage_audit()
-        result = super().__call__(media, prompts)
-        if not self._coverage_checked:
-            inferencer = _videoalign._get_inferencer(
-                self.device,
-                self.checkpoint_path,
+        inferencer = _videoalign._get_inferencer(
+            self.device,
+            self.checkpoint_path,
+        )
+        images_np = media_to_uint8_array(media)
+        paths: list[str] = []
+        reward_prompts: list[str] = []
+        try:
+            for sample_index, sample in enumerate(images_np):
+                frames = sample[None] if sample.ndim == 3 else sample
+                paths.append(
+                    _videoalign._save_video_to_temp(self._frames(frames))
+                )
+                reward_prompts.append(self._prompt(prompts, sample_index))
+            # VideoAlign's inferencer supports a real batch. The old wrapper
+            # invoked Qwen separately for every video, which made larger rollout
+            # groups unnecessarily expensive.
+            results = inferencer.reward(
+                paths,
+                reward_prompts,
+                use_norm=True,
             )
+            scores = [
+                float(result.get(self.score_key, 0.0))
+                for result in results
+            ]
+        finally:
+            for path in paths:
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+
+        if not self._coverage_checked:
             assert_videoalign_checkpoint_coverage(inferencer.model)
             self._coverage_checked = True
-        return result
+        return torch.tensor(
+            scores,
+            device=self.device,
+            dtype=torch.float32,
+        )
 
 
 class AuditedVideoAlignMotionQualityScorer(
     _AuditedScorerMixin,
     _videoalign.VideoAlignMotionQualityScorer,
 ):
-    pass
+    def _prompt(self, prompts, index: int) -> str:
+        del prompts, index
+        return ""
 
 
 class AuditedVideoAlignVisualQualityScorer(
     _AuditedScorerMixin,
     _videoalign.VideoAlignVisualQualityScorer,
 ):
-    pass
+    def _prompt(self, prompts, index: int) -> str:
+        del prompts, index
+        return ""
 
 
 class AuditedVideoAlignTextAlignmentScorer(
