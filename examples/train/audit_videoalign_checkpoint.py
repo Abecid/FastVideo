@@ -41,9 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-path", type=Path)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--minimum-overall-coverage", type=float, default=0.90)
-    parser.add_argument("--minimum-head-coverage", type=float, default=0.99)
+    parser.add_argument("--minimum-overall-coverage", type=float, default=0.97)
+    parser.add_argument("--minimum-component-coverage", type=float, default=0.95)
+    parser.add_argument("--require-reward-head", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--require-motion-order", action="store_true")
+    parser.add_argument("--repeatability-tolerance", type=float, default=1.0e-6)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
@@ -59,16 +62,10 @@ def main() -> None:
             raise FileNotFoundError(checkpoint)
         os.environ["VIDEOALIGN_CHECKPOINT_PATH"] = str(checkpoint)
 
-    os.environ["VIDEOALIGN_MIN_OVERALL_COVERAGE"] = str(
-        args.minimum_overall_coverage
-    )
-    os.environ["VIDEOALIGN_MIN_HEAD_COVERAGE"] = str(
-        args.minimum_head_coverage
-    )
-
     from fastvideo.train.methods.rl.rewards import build_multi_reward_scorer
     from fastvideo.train.methods.rl.rewards.videoalign_audit import (
-        videoalign_coverage_summary,
+        audit_videoalign_checkpoint,
+        repeatability_probe,
     )
 
     reward_map = {
@@ -81,15 +78,27 @@ def main() -> None:
         backend="genrl",
         device=torch.device(device),
     )
+    coverage = audit_videoalign_checkpoint(
+        device=device,
+        checkpoint_path=os.environ.get("VIDEOALIGN_CHECKPOINT_PATH"),
+        minimum_checkpoint_numel_coverage=args.minimum_overall_coverage,
+        minimum_component_coverage=args.minimum_component_coverage,
+        require_reward_head=args.require_reward_head,
+    )
+    repeatability = repeatability_probe(
+        scorer,
+        device=device,
+        tolerance=args.repeatability_tolerance,
+    )
+
     media, prompts = synthetic_clips()
-    media = media.to(device)
-    scores = scorer(media, prompts)
+    scores = scorer(media.to(device), prompts)
     values = {
         name: [float(item) for item in tensor.detach().float().cpu()]
         for name, tensor in scores.items()
     }
     for name, items in values.items():
-        if not all(torch.isfinite(torch.tensor(items))):
+        if not torch.isfinite(torch.tensor(items)).all():
             raise RuntimeError(f"VideoAlign returned non-finite {name}: {items}")
 
     if args.require_motion_order:
@@ -105,10 +114,15 @@ def main() -> None:
         "checkpoint_path": os.environ.get("VIDEOALIGN_CHECKPOINT_PATH"),
         "clips": ["static", "smooth_motion", "flicker"],
         "scores": values,
-        "coverage": videoalign_coverage_summary(),
+        "coverage": coverage,
+        "repeatability": repeatability,
     }
+    payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(payload, encoding="utf-8")
     print("VideoAlign audit passed:")
-    print(json.dumps(summary, indent=2, sort_keys=True))
+    print(payload, end="")
     if args.json:
         print(json.dumps(summary, sort_keys=True))
 
