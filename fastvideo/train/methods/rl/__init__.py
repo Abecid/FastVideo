@@ -17,12 +17,16 @@ from fastvideo.train.methods.rl.finite_transition_reliable_audited import (
 from fastvideo.train.methods.rl.finite_transition_reliable_calibrated import (
     CalibratedReliableFiniteTransitionMethod,
 )
+from fastvideo.train.methods.rl.finite_transition_v2_final import (
+    FiniteTransitionV2FinalMethod,
+)
 
 __all__ = [
     "AuditedReliableFiniteTransitionMethod",
     "CalibratedReliableFiniteTransitionMethod",
     "DiffusionNFTMethod",
     "FiniteTransitionPosteriorMethod",
+    "FiniteTransitionV2FinalMethod",
     "ReliableFiniteTransitionMethod",
     "ReproducibleFiniteTransitionPosteriorMethod",
 ]
