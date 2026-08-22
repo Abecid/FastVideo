@@ -1,0 +1,183 @@
+# Reliable full-trajectory finite-transition RL on AnyFlow-Wan 1.3B.
+#
+# This is the common-substrate repair after the first 200-step FTPP/GRPO pair:
+# - all four stochastic transitions contribute gradients;
+# - multiple prompt groups are accumulated before one optimizer update;
+# - reward advantages use running per-prompt baselines and a global scale;
+# - posterior temperature uses the global reward scale rather than forced ESS;
+# - effective update size is calibrated by measured post-update KL;
+# - validation logs raw and EMA prompt-seed paired confidence intervals;
+# - audited VideoAlign scorers fail when checkpoint coverage is incomplete.
+#
+# Change only method.objective for the likelihood-objective comparison:
+#   flowmap_grpo | posterior_projection
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+    flow_shift: 5.0
+    lora:
+      enable: true
+      rank: 64
+      alpha: 128
+      target_modules:
+        - to_q
+        - to_k
+        - to_v
+        - to_out
+        - ffn.fc_in
+        - ffn.fc_out
+
+method:
+  _target_: fastvideo.train.methods.rl.finite_transition_reliable.ReliableFiniteTransitionMethod
+  objective: flowmap_grpo
+
+  # Flow-Map-GRPO-style trajectory: four stochastic finite transitions and a
+  # final deterministic completion. Deterministic evaluation remains four-step.
+  require_train_eval_schedule_match: false
+  train_map_steps: 5
+  eval_map_steps: 4
+  stochastic_steps: 4
+  rollout_mode: full_trajectory
+  transition_loss_reduction: mean
+
+  # Four H100s hold two candidates each. Four independent prompt groups are
+  # accumulated, so one optimizer update uses 32 reward-scored videos and 128
+  # stochastic transition likelihood terms.
+  group_size: 8
+  rollout_groups_per_update: 4
+
+  anchor_type: local
+  local_anchor_delta: 0.03
+  local_noise_scale: 0.7
+  local_terminal_base_sigma: 0.05
+  flow_shift: 5.0
+  attn_kind: dense
+
+  reward_normalization: running_prompt_global
+  running_reward_stats:
+    min_prompt_count: 4
+    min_global_count: 32
+    epsilon: 0.0001
+    clip: 5.0
+
+  # Unlike fixed ESS, a weak reward group is allowed to remain close to uniform
+  # and therefore produce a weak update.
+  posterior_temperature_mode: global_std
+  posterior_temperature_scale: 1.0
+  target_ess_ratio: 0.50
+  reward_bisection_steps: 40
+
+  # Standalone baseline is on-policy. For a strict objective-only paired run,
+  # the Modal launcher overrides this to base_adapter_disabled in both arms.
+  behavior_policy: current
+
+  clip_range: 0.0001
+  advantage_clip: 5.0
+  advantage_epsilon: 0.0001
+  max_grad_norm: 1.0
+  transfer_probe_every: 10
+  terminal_progress: true
+
+  target_kl_controller:
+    enabled: true
+    target_kl: 0.00001
+    initial_loss_scale: 1.0
+    min_loss_scale: 0.05
+    max_loss_scale: 128.0
+    max_adjustment: 2.0
+
+  reward_backend: genrl
+  optimize_reward: videoalign_mq_audited
+  reward_fn:
+    rewards:
+      videoalign_mq_audited: 1.0
+      videoalign_vq_audited: 1.0
+      videoalign_ta_audited: 1.0
+
+  validation:
+    every_steps: 50
+    num_steps: 4
+    num_prompts: 64
+    batch_size: 1
+    log_samples: true
+    max_samples: 8
+    fps: 16
+    seed: 42
+    data_path:
+
+  paired_validation:
+    bootstrap_samples: 4000
+    confidence: 0.95
+
+  evaluation:
+    samples_per_prompt: 2
+    static_temporal_l1_threshold: 0.01
+    primary_min_delta: 0.02
+    significance_z: 1.96
+    min_motion_ratio: 0.90
+    min_latent_diversity_ratio: 0.80
+    heldout_max_drop:
+      videoalign_vq_audited: 0.02
+      videoalign_ta_audited: 0.02
+
+  ema:
+    enabled: true
+    decay: 0.90
+    update_after_step: 0
+    validation: true
+
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/finite_transition_reliable/train/combined_parquet_dataset
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 2
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 21
+    num_height: 480
+    num_width: 832
+    num_frames: 81
+
+  optimizer:
+    learning_rate: 0.00002
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 100
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: outputs/wan_anyflow_finite_transition_reliable
+    training_state_checkpointing_steps: 25
+    checkpoints_total_limit: 4
+    resume_from_checkpoint:
+
+  tracker:
+    entity: adamlee00
+    project_name: finite-transition-reliable-wan
+    run_name: anyflow_reliable_grpo_videoalign_mq
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+pipeline:
+  flow_shift: 5.0
+  dit_config:
+    r_embedder: true
+    r_embedder_fusion: gated
+    r_embedder_gate_value: 0.25
+    r_embedder_deltatime_type: r
