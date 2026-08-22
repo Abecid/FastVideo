@@ -3,8 +3,8 @@
 # Uses the exact same accumulated multi-transition rollout substrate as the v2
 # GRPO baseline. The only scientific delta is the score coefficient: centered
 # global-temperature Boltzmann weights instead of running-baseline advantages.
-# Unlike the first FTPP experiment, weak four-sample rankings are not forced to
-# ESS=2; a flat group naturally produces nearly uniform weights and no update.
+# Weak rankings are not forced to a fixed ESS; flat groups naturally produce
+# nearly uniform weights and a near-zero update.
 
 models:
   student:
@@ -25,8 +25,7 @@ models:
         - ffn.fc_out
 
 method:
-  _target_: fastvideo.train.methods.rl.finite_transition_v2.FiniteTransitionV2Method
-  # Parent-compatible mode; v2_objective is the actual loss selector.
+  _target_: fastvideo.train.methods.rl.finite_transition_v2_final.FiniteTransitionV2FinalMethod
   objective: posterior_projection
   v2_objective: posterior_projection
 
@@ -35,7 +34,7 @@ method:
   eval_map_steps: 4
   stochastic_steps: 4
   transition_mode: all
-  group_size: 4
+  group_size: 8
   rollout_groups_per_update: 4
   behavior_policy: on_policy
 
@@ -51,14 +50,15 @@ method:
   advantage_clip: 5.0
   advantage_epsilon: 0.0001
 
-  # Preserve absolute reward confidence across groups.
   posterior_temperature_mode: global_std
   posterior_temperature_multiplier: 1.0
   posterior_min_temperature: 0.001
   target_ess_ratio: 0.50
   reward_bisection_steps: 40
 
-  clip_range: 0.001
+  # Clipping is irrelevant to the posterior loss, but keeping a usable common
+  # value makes strict shared-behavior GRPO/posterior configurations identical.
+  clip_range: 0.02
   target_post_update_kl: 0.00003
   kl_controller_rate: 0.25
   initial_loss_scale: 1.0
@@ -67,20 +67,26 @@ method:
   max_grad_norm: 1.0
   post_update_probe_every: 1
 
+  # Online rollouts call only MQ. VQ and TA remain held-out diagnostics evaluated
+  # at fixed validation checkpoints.
   reward_backend: genrl
-  optimize_reward: videoalign_mq
+  optimize_reward: videoalign_mq_audited
   diagnostic_reward: none
   reward_fn:
     rewards:
-      videoalign_mq: 1.0
-      videoalign_vq: 1.0
-      videoalign_ta: 1.0
+      videoalign_mq_audited: 1.0
+  validation_reward_backend: genrl
+  validation_reward_fn:
+    rewards:
+      videoalign_mq_audited: 1.0
+      videoalign_vq_audited: 1.0
+      videoalign_ta_audited: 1.0
 
   videoalign_audit:
     enabled: true
     minimum_checkpoint_numel_coverage: 0.97
     minimum_component_coverage: 0.95
-    require_reward_head: false
+    require_reward_head: true
     repeatability_tolerance: 0.000001
 
   validation:
@@ -97,15 +103,15 @@ method:
   validate_raw_model: true
   validate_ema_model: true
   evaluation:
-    samples_per_prompt: 1
+    samples_per_prompt: 2
     static_temporal_l1_threshold: 0.01
     primary_min_delta: 0.02
     significance_z: 1.96
     min_motion_ratio: 0.90
     min_latent_diversity_ratio: 0.80
     heldout_max_drop:
-      videoalign_vq: 0.02
-      videoalign_ta: 0.02
+      videoalign_vq_audited: 0.02
+      videoalign_ta_audited: 0.02
 
   ema:
     enabled: true
@@ -128,7 +134,7 @@ training:
     data_path: data/finite_transition_posterior/train/combined_parquet_dataset
     preprocessed_data_type: text_only
     dataloader_num_workers: 0
-    train_batch_size: 1
+    train_batch_size: 2
     training_cfg_rate: 0.0
     seed: 42
     num_latent_t: 21
