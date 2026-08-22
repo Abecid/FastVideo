@@ -11,8 +11,8 @@ import torch
 
 from fastvideo.pipelines import TrainingBatch
 import fastvideo.train.methods.rl.finite_transition_posterior as ftp
-from fastvideo.train.methods.rl.finite_transition_reliable import (
-    ReliableFiniteTransitionMethod,
+from fastvideo.train.methods.rl.finite_transition_reliable_calibrated import (
+    CalibratedReliableFiniteTransitionMethod,
 )
 
 
@@ -198,7 +198,7 @@ def _make_method(
     objective: str,
     rollout_mode: str,
     behavior_policy: str = "current",
-) -> tuple[ReliableFiniteTransitionMethod, _FakeStudent]:
+) -> tuple[CalibratedReliableFiniteTransitionMethod, _FakeStudent]:
     def build_optimizer(params: list[torch.nn.Parameter], **kwargs: Any):
         del kwargs
         return torch.optim.SGD(params, lr=0.05), _NoopScheduler()
@@ -219,7 +219,7 @@ def _make_method(
     )
 
     student = _FakeStudent()
-    method = ReliableFiniteTransitionMethod(
+    method = CalibratedReliableFiniteTransitionMethod(
         cfg=_config(
             objective,
             rollout_mode=rollout_mode,
@@ -273,9 +273,14 @@ def test_reliable_full_trajectory_updates_all_transitions(
     assert metrics["reliable/reward_samples_per_update"] == 4.0
     assert metrics["reliable/stochastic_transitions_per_trajectory"] == 2.0
     assert float(metrics["reliable/post_update_approx_kl"]) >= 0.0
+    assert "reliable/lossdiag/transition_0/ratio_mean" in metrics or (
+        objective == "posterior_projection"
+        and "reliable/lossdiag/transition_0/posterior_weight_mass_local"
+        in metrics
+    )
 
 
-def test_fixed_base_behavior_is_available_for_shared_rollouts(
+def test_fixed_base_behavior_uses_incremental_not_cumulative_kl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     method, _ = _make_method(
@@ -285,7 +290,12 @@ def test_fixed_base_behavior_is_available_for_shared_rollouts(
         behavior_policy="base_adapter_disabled",
     )
     _, _, metrics = method.managed_train_step(iter(()), 1)
+
     assert metrics["reliable/behavior_is_fixed_base"] == 1.0
+    assert float(metrics["reliable/post_update_approx_kl"]) >= 0.0
+    # The calibrated method stores a learner pre-update likelihood separately
+    # from the fixed behavior likelihood; target-KL is incremental update size.
+    assert float(metrics["reliable/loss_scale_next"]) > 0.0
 
 
 def test_finite_velocity_regression_updates_deterministic_map(
