@@ -1,0 +1,176 @@
+# Resource-aware Flow-Map-GRPO baseline for AnyFlow-Wan video.
+#
+# This is intentionally stronger than the first matched 4-candidate/one-step
+# ablation. One optimizer update collects four prompt groups (16 videos) and
+# uses every one of four stochastic finite transitions in each trajectory.
+# Rewards use a running prompt baseline and a global rollout standard deviation.
+# A conservative controller adapts the effective loss scale toward target KL.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+    flow_shift: 5.0
+    lora:
+      enable: true
+      rank: 64
+      alpha: 128
+      target_modules:
+        - to_q
+        - to_k
+        - to_v
+        - to_out
+        - ffn.fc_in
+        - ffn.fc_out
+
+method:
+  _target_: fastvideo.train.methods.rl.finite_transition_v2.FiniteTransitionV2Method
+  objective: flowmap_grpo
+  v2_objective: flowmap_grpo
+
+  # Flow-Map-GRPO-style rollout: four stochastic transitions followed by one
+  # deterministic completion. Deterministic evaluation remains four-step.
+  require_train_eval_schedule_match: false
+  train_map_steps: 5
+  eval_map_steps: 4
+  stochastic_steps: 4
+  transition_mode: all
+  group_size: 4
+  rollout_groups_per_update: 4
+  behavior_policy: on_policy
+
+  anchor_type: local
+  local_anchor_delta: 0.03
+  local_noise_scale: 0.7
+  local_terminal_base_sigma: 0.05
+  flow_shift: 5.0
+
+  # Stable reward statistics across all 16 videos in an optimizer update.
+  reward_std_decay: 0.95
+  reward_std_floor: 0.05
+  initial_reward_std: 0.25
+  advantage_clip: 5.0
+  advantage_epsilon: 0.0001
+
+  # PPO/GRPO trust region. The controller calibrates actual movement rather
+  # than assuming the same learning rate means the same update across losses.
+  clip_range: 0.001
+  target_post_update_kl: 0.00003
+  kl_controller_rate: 0.25
+  initial_loss_scale: 1.0
+  minimum_loss_scale: 0.1
+  maximum_loss_scale: 100.0
+  max_grad_norm: 1.0
+  post_update_probe_every: 1
+
+  # These posterior fields are still calculated for diagnostics but do not
+  # affect the GRPO loss.
+  posterior_temperature_mode: global_std
+  posterior_temperature_multiplier: 1.0
+  posterior_min_temperature: 0.001
+  target_ess_ratio: 0.50
+  reward_bisection_steps: 40
+
+  reward_backend: genrl
+  optimize_reward: videoalign_mq
+  diagnostic_reward: none
+  reward_fn:
+    rewards:
+      videoalign_mq: 1.0
+      videoalign_vq: 1.0
+      videoalign_ta: 1.0
+
+  videoalign_audit:
+    enabled: true
+    minimum_checkpoint_numel_coverage: 0.97
+    minimum_component_coverage: 0.95
+    # Key naming differs across VideoAlign releases; coverage is still logged.
+    require_reward_head: false
+    repeatability_tolerance: 0.000001
+
+  validation:
+    every_steps: 25
+    num_steps: 4
+    num_prompts: 128
+    batch_size: 1
+    log_samples: true
+    max_samples: 8
+    fps: 16
+    seed: 42
+    data_path:
+
+  validate_raw_model: true
+  validate_ema_model: true
+  evaluation:
+    samples_per_prompt: 1
+    static_temporal_l1_threshold: 0.01
+    primary_min_delta: 0.02
+    significance_z: 1.96
+    min_motion_ratio: 0.90
+    min_latent_diversity_ratio: 0.80
+    heldout_max_drop:
+      videoalign_vq: 0.02
+      videoalign_ta: 0.02
+
+  ema:
+    enabled: true
+    decay: 0.90
+    update_after_step: 0
+    validation: true
+  ema_update_interval: 8
+  terminal_progress: true
+  attn_kind: dense
+
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/finite_transition_posterior/train/combined_parquet_dataset
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 21
+    num_height: 480
+    num_width: 832
+    num_frames: 81
+
+  optimizer:
+    learning_rate: 0.00002
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 100
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: outputs/wan_anyflow_flowmap_grpo_v2
+    training_state_checkpointing_steps: 25
+    checkpoints_total_limit: 5
+    resume_from_checkpoint:
+
+  tracker:
+    entity: adamlee00
+    project_name: finite-transition-v2-wan
+    run_name: anyflow_flowmap_grpo_v2_videoalign_mq
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+pipeline:
+  flow_shift: 5.0
+  dit_config:
+    r_embedder: true
+    r_embedder_fusion: gated
+    r_embedder_gate_value: 0.25
+    r_embedder_deltatime_type: r
