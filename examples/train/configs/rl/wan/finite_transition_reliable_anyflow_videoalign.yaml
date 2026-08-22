@@ -1,13 +1,14 @@
 # Reliable full-trajectory finite-transition RL on AnyFlow-Wan 1.3B.
 #
-# This is the common-substrate repair after the first 200-step FTPP/GRPO pair:
+# Common-substrate repair after the first 200-step FTPP/GRPO pair:
 # - all four stochastic transitions contribute gradients;
 # - multiple prompt groups are accumulated before one optimizer update;
 # - reward advantages use running per-prompt baselines and a global scale;
 # - posterior temperature uses the global reward scale rather than forced ESS;
-# - effective update size is calibrated by measured post-update KL;
+# - effective update size is calibrated by incremental post-update KL;
 # - validation logs raw and EMA prompt-seed paired confidence intervals;
-# - audited VideoAlign scorers fail when checkpoint coverage is incomplete.
+# - VideoAlign load coverage is asserted;
+# - training scores only MQ, while validation scores MQ/VQ/TA.
 #
 # Change only method.objective for the likelihood-objective comparison:
 #   flowmap_grpo | posterior_projection
@@ -31,7 +32,7 @@ models:
         - ffn.fc_out
 
 method:
-  _target_: fastvideo.train.methods.rl.finite_transition_reliable.ReliableFiniteTransitionMethod
+  _target_: fastvideo.train.methods.rl.finite_transition_reliable_audited.AuditedReliableFiniteTransitionMethod
   objective: flowmap_grpo
 
   # Flow-Map-GRPO-style trajectory: four stochastic finite transitions and a
@@ -89,9 +90,15 @@ method:
     max_loss_scale: 128.0
     max_adjustment: 2.0
 
+  # Only MQ is called during expensive online rollouts. VQ and TA are evaluated
+  # on fixed held-out videos at validation checkpoints.
   reward_backend: genrl
   optimize_reward: videoalign_mq_audited
   reward_fn:
+    rewards:
+      videoalign_mq_audited: 1.0
+  validation_reward_backend: genrl
+  validation_reward_fn:
     rewards:
       videoalign_mq_audited: 1.0
       videoalign_vq_audited: 1.0
