@@ -42,6 +42,16 @@ cd "${REPO_ROOT}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 
+# ── Fail-fast scientific contract ────────────────────────────────
+# Resolved Modal configs contain all scientific overrides. Refuse to allocate
+# distributed workers when a v2 config silently changes the AnyFlow model,
+# schedule, candidate batch, reward split, audit, or validation contract.
+if grep -q "finite_transition_v2_final.FiniteTransitionV2FinalMethod" "${CONFIG}"; then
+    python -m examples.train.check_finite_transition_v2_contract \
+        "${CONFIG}" \
+        --json
+fi
+
 # ── Log file ─────────────────────────────────────────────────────
 CONFIG_NAME="$(basename "${CONFIG}" .yaml)"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
