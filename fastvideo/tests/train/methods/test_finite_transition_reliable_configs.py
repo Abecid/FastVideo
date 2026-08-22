@@ -45,8 +45,8 @@ def test_reliable_recipe_contracts(
     )
     method = cfg.method
     assert method["_target_"] == (
-        "fastvideo.train.methods.rl.finite_transition_reliable."
-        "ReliableFiniteTransitionMethod"
+        "fastvideo.train.methods.rl.finite_transition_reliable_audited."
+        "AuditedReliableFiniteTransitionMethod"
     )
     assert method["objective"] == objective
     assert method["train_map_steps"] == train_steps
@@ -57,3 +57,19 @@ def test_reliable_recipe_contracts(
     assert arch.r_embedder is True
     assert arch.r_embedder_gate_value == pytest.approx(0.25)
     assert arch.r_embedder_deltatime_type == "r"
+
+
+def test_reliable_videoalign_uses_one_training_head_and_three_eval_heads() -> None:
+    cfg = load_run_config(
+        "examples/train/configs/rl/wan/"
+        "finite_transition_reliable_anyflow_videoalign.yaml"
+    )
+    method = cfg.method
+    assert set(method["reward_fn"]["rewards"]) == {
+        "videoalign_mq_audited"
+    }
+    assert set(method["validation_reward_fn"]["rewards"]) == {
+        "videoalign_mq_audited",
+        "videoalign_vq_audited",
+        "videoalign_ta_audited",
+    }
