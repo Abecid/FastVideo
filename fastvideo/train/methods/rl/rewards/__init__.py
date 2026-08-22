@@ -28,6 +28,9 @@ GENRL_REWARD_NAMES = frozenset({
     "videoalign_mq",
     "videoalign_ta",
     "videoalign_vq",
+    "videoalign_mq_audited",
+    "videoalign_ta_audited",
+    "videoalign_vq_audited",
 })
 
 _NATIVE_SCORER_CLASSES: dict[str, Any] = {
@@ -51,19 +54,45 @@ def _build_lazy_genrl_scorer(
 
         return HPSv3PercentileScorer(device=device)
     if name == "videoalign_mq":
-        from fastvideo.train.methods.rl.rewards.videoalign import VideoAlignMotionQualityScorer
+        from fastvideo.train.methods.rl.rewards.videoalign import (
+            VideoAlignMotionQualityScorer,
+        )
 
         return VideoAlignMotionQualityScorer(device=device)
     if name == "videoalign_ta":
-        from fastvideo.train.methods.rl.rewards.videoalign import VideoAlignTextAlignmentScorer
+        from fastvideo.train.methods.rl.rewards.videoalign import (
+            VideoAlignTextAlignmentScorer,
+        )
 
         return VideoAlignTextAlignmentScorer(device=device)
     if name == "videoalign_vq":
-        from fastvideo.train.methods.rl.rewards.videoalign import VideoAlignVisualQualityScorer
+        from fastvideo.train.methods.rl.rewards.videoalign import (
+            VideoAlignVisualQualityScorer,
+        )
 
         return VideoAlignVisualQualityScorer(device=device)
-    raise ValueError(f"Unsupported GenRL reward {name!r}. "
-                     f"Available GenRL rewards: {sorted(GENRL_REWARD_NAMES)}")
+    if name == "videoalign_mq_audited":
+        from fastvideo.train.methods.rl.rewards.videoalign_audit import (
+            AuditedVideoAlignMotionQualityScorer,
+        )
+
+        return AuditedVideoAlignMotionQualityScorer(device=device)
+    if name == "videoalign_ta_audited":
+        from fastvideo.train.methods.rl.rewards.videoalign_audit import (
+            AuditedVideoAlignTextAlignmentScorer,
+        )
+
+        return AuditedVideoAlignTextAlignmentScorer(device=device)
+    if name == "videoalign_vq_audited":
+        from fastvideo.train.methods.rl.rewards.videoalign_audit import (
+            AuditedVideoAlignVisualQualityScorer,
+        )
+
+        return AuditedVideoAlignVisualQualityScorer(device=device)
+    raise ValueError(
+        f"Unsupported GenRL reward {name!r}. "
+        f"Available GenRL rewards: {sorted(GENRL_REWARD_NAMES)}"
+    )
 
 
 def build_multi_reward_scorer(
@@ -76,8 +105,10 @@ def build_multi_reward_scorer(
     reward_weights, reward_backend = normalize_reward_weights(reward_weights)
     backend = reward_backend or str(backend or "auto").strip().lower()
     if backend not in {"auto", "diffusion_nft", "genrl"}:
-        raise ValueError("method.reward_backend must be one of auto, diffusion_nft, or genrl, "
-                         f"got {backend!r}")
+        raise ValueError(
+            "method.reward_backend must be one of auto, diffusion_nft, or "
+            f"genrl, got {backend!r}"
+        )
 
     available: dict[str, RewardScorer] = dict(scorers or {})
     for name in reward_weights:
@@ -92,8 +123,10 @@ def build_multi_reward_scorer(
         scorer_cls = _NATIVE_SCORER_CLASSES.get(name)
         if scorer_cls is None:
             if backend == "genrl":
-                raise ValueError(f"Unsupported GenRL reward {name!r}. "
-                                 f"Available GenRL rewards: {sorted(GENRL_REWARD_NAMES)}")
+                raise ValueError(
+                    f"Unsupported GenRL reward {name!r}. "
+                    f"Available GenRL rewards: {sorted(GENRL_REWARD_NAMES)}"
+                )
             available[name] = ExternalDiffusionNFTScorer(name, device=device)
         elif name in BUILTIN_DEBUG_REWARD_SCORERS:
             available[name] = scorer_cls()
