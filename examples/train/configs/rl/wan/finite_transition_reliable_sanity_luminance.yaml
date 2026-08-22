@@ -1,0 +1,157 @@
+# Cheap end-to-end learnability gate for the finite-transition RL substrate.
+#
+# The purpose is not a paper result. The run must increase deterministic held-out
+# mean luminance before VideoAlign or a novel objective is trusted. Failure means
+# the problem is in rollout likelihoods, update scaling, LoRA plumbing, or
+# stochastic-to-deterministic transfer rather than reward-model semantics.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+    flow_shift: 5.0
+    lora:
+      enable: true
+      rank: 32
+      alpha: 64
+      target_modules:
+        - to_q
+        - to_k
+        - to_v
+        - to_out
+        - ffn.fc_in
+        - ffn.fc_out
+
+method:
+  _target_: fastvideo.train.methods.rl.finite_transition_reliable.ReliableFiniteTransitionMethod
+  objective: flowmap_grpo
+  require_train_eval_schedule_match: false
+  train_map_steps: 5
+  eval_map_steps: 4
+  stochastic_steps: 4
+  rollout_mode: full_trajectory
+  transition_loss_reduction: mean
+
+  group_size: 4
+  rollout_groups_per_update: 2
+
+  anchor_type: local
+  local_anchor_delta: 0.03
+  local_noise_scale: 0.7
+  local_terminal_base_sigma: 0.05
+  flow_shift: 5.0
+  attn_kind: dense
+
+  reward_normalization: running_prompt_global
+  running_reward_stats:
+    min_prompt_count: 2
+    min_global_count: 8
+    epsilon: 0.0001
+    clip: 5.0
+  posterior_temperature_mode: global_std
+  posterior_temperature_scale: 1.0
+  behavior_policy: current
+
+  clip_range: 0.0001
+  advantage_clip: 5.0
+  advantage_epsilon: 0.0001
+  max_grad_norm: 1.0
+  transfer_probe_every: 5
+
+  target_kl_controller:
+    enabled: true
+    target_kl: 0.00003
+    initial_loss_scale: 1.0
+    min_loss_scale: 0.05
+    max_loss_scale: 128.0
+    max_adjustment: 2.0
+
+  reward_backend: auto
+  optimize_reward: mean_luminance
+  reward_fn:
+    rewards:
+      mean_luminance: 1.0
+
+  validation:
+    every_steps: 10
+    num_steps: 4
+    num_prompts: 16
+    batch_size: 1
+    log_samples: true
+    max_samples: 8
+    fps: 16
+    seed: 42
+    data_path:
+
+  paired_validation:
+    bootstrap_samples: 1000
+    confidence: 0.95
+
+  evaluation:
+    samples_per_prompt: 1
+    static_temporal_l1_threshold: 0.001
+    primary_min_delta: 0.01
+    significance_z: 1.96
+    min_motion_ratio: 0.75
+    min_latent_diversity_ratio: 0.0
+    heldout_max_drop: {}
+
+  ema:
+    enabled: true
+    decay: 0.90
+    update_after_step: 0
+    validation: true
+
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/finite_transition_sanity/train/combined_parquet_dataset
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 5
+    num_height: 256
+    num_width: 448
+    num_frames: 17
+
+  optimizer:
+    learning_rate: 0.00002
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 50
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: outputs/wan_anyflow_finite_transition_sanity
+    training_state_checkpointing_steps: 10
+    checkpoints_total_limit: 3
+    resume_from_checkpoint:
+
+  tracker:
+    entity: adamlee00
+    project_name: finite-transition-reliable-wan
+    run_name: anyflow_grpo_mean_luminance_sanity
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+pipeline:
+  flow_shift: 5.0
+  dit_config:
+    r_embedder: true
+    r_embedder_fusion: gated
+    r_embedder_gate_value: 0.25
+    r_embedder_deltatime_type: r
