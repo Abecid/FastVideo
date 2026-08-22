@@ -1,245 +1,76 @@
 # Finite-transition v2: execution and decision plan
 
-Read this file before launching or repairing the next AnyFlow reward-training
-experiment. The original 200-step corrected-grid run was stable but produced no
-held-out MQ gain for either FTPP or its matched one-update GRPO control. Running
-the same recipe for 1,200 steps is not the next experiment.
+Read this before launching or repairing the next AnyFlow reward-training run.
 
-## What was wrong with the shared substrate
+The corrected 200-step FTPP/GRPO experiment was numerically stable but neither
+arm improved deterministic held-out VideoAlign MQ. The old recipe used only one
+prompt group, four candidate videos, one selected transition, learning rate
+`2e-6`, noisy group-local normalization, and EMA-only evaluation. Maximum
+post-update KL was about `1e-7`: both policies barely moved.
 
-The corrected run used only:
+V2 repairs the common substrate before asking which update rule is better.
 
-```text
-1 prompt group / optimizer update
-4 candidate videos / prompt
-1 selected finite transition / video
-learning rate 2e-6
-group-local reward standardization
-one score-function update
-EMA-only validation
-```
-
-Maximum measured post-update KL was approximately `1e-7`. Both methods barely
-moved. Moreover, fixed four-sample normalization gave full-strength directions
-to weak/noisy local reward rankings, and the two objectives were almost the same
-score estimator.
-
-V2 changes the shared substrate before judging the update rule.
-
-## V2 changes
-
-### More information per optimizer update
-
-The default GRPO/posterior presets collect:
-
-```text
-4 prompt groups / optimizer update
-4 candidate videos / prompt
-4 stochastic finite transitions / trajectory
-16 reward-scored videos / optimizer update
-64 transition likelihood records / optimizer update
-```
-
-This is still resource-aware rather than a claim of exact reproduction of the
-24-candidate published image recipe. It is materially stronger than the first
-four-video update.
-
-### Stable reward normalization
-
-GRPO v2 uses:
-
-```text
-A = (R - running_prompt_mean) / global_rollout_std
-```
-
-where the denominator is estimated from all candidate videos in the accumulated
-optimizer batch and smoothed over time. It is not a four-sample group standard
-deviation.
-
-Posterior v2 uses one global/EMA reward temperature:
-
-```text
-w = softmax((R - baseline) / tau_global)
-```
-
-A group with almost equal rewards therefore produces nearly uniform weights and
-a nearly zero centered update. It is no longer forcibly sharpened to ESS=2.
-
-### Explicit update-scale calibration
-
-Both likelihood objectives log the actual post-update policy movement and adapt
-loss scale toward a configured target KL. The controller is deliberately slow:
-
-```text
-scale_next = scale * (target_kl / observed_kl)^(controller_rate / 2)
-```
-
-with bounded scale. The first target is `3e-5`, not because it is universal, but
-because the old `1e-7` regime was clearly too weak to test learnability.
-
-### Multi-transition Flow-Map GRPO
-
-The v2 GRPO/posterior rollout uses an official AnyFlow five-segment training
-schedule:
-
-```text
-4 stochastic ASFMC transitions
-1 deterministic completion to data
-```
-
-All four stochastic transitions receive the same terminal reward signal. Four-
-step deterministic AnyFlow remains the deployment evaluation. This is closer to
-Flow-Map-GRPO's actual multi-transition formulation than selecting one local
-transition per video.
-
-### Raw and EMA evaluation
-
-Every validation checkpoint evaluates:
-
-```text
-raw LoRA weights
-EMA weights
-```
-
-The original decay-0.99 EMA could hide early raw-model movement. V2 defaults to
-EMA `0.9`, updated every eight optimizer updates, and still reports raw results
-separately.
-
-### Paired statistics
-
-For every fixed prompt index, v2 stores raw/EMA metric values under:
-
-```text
-<output_dir>/paired_validation/
-```
-
-It logs:
-
-```text
-paired mean delta
-paired delta std and SEM
-paired bootstrap 95% interval
-```
-
-for MQ, VQ, TA, motion, static rate, and diversity. Do not use the old
-independent-SEM gate for fixed prompt/seed evaluations.
-
-### Reward-model audit
-
-Before training, the final method:
-
-1. loads the prepared VideoAlign inferencer;
-2. compares checkpoint tensors against runtime model keys and shapes;
-3. records total, adapter, and detected reward-head coverage;
-4. fails below configured coverage thresholds; and
-5. scores a deterministic synthetic moving-square video twice to assert runtime
-   repeatability.
-
-The JSON audit is written to:
-
-```text
-<output_dir>/videoalign_checkpoint_audit.json
-```
-
-This does not replace a one-time numerical comparison against upstream
-VideoAlign, but it prevents silent partial checkpoint loading.
-
-### Stochastic-to-deterministic transfer diagnostic
-
-For one probe transition each optimizer update, v2 logs:
-
-```text
-ftv2/preferred_action_shift_rms
-ftv2/deterministic_map_shift_rms
-ftv2/deterministic_preference_alignment
-```
-
-The last metric is the cosine between the reward-posterior preferred next-state
-direction and the actual post-update shift of AnyFlow's deterministic finite
-map. Positive reward selection is not useful if this alignment is zero or
-negative.
-
-## Objectives
-
-### `grpo`
-
-Resource-aware multi-transition Flow-Map-GRPO baseline with running prompt/global
-reward statistics and target-KL control.
-
-### `posterior`
-
-Identical rollout and target-KL substrate, but uses centered global-temperature
-Boltzmann weights. This is the fair update-rule comparison after the GRPO
-baseline learns.
-
-### `velocity`
-
-Uses shared-state branches and a frozen-base behavior policy. Candidate actions
-are converted to finite velocities:
-
-```text
-g_j = (x_t - a_j) / Delta
-Delta_u = sum_j (w_j - 1/G) g_j
-u_target = u_behavior + eta * Delta_u
-```
-
-`eta` is capped by a target deterministic next-state RMS change. The student is
-trained by ordinary stopped velocity regression. This directly modifies the
-finite map used at deterministic inference and is the meaningful follow-up when
-both likelihood objectives remain tied.
-
-### `diagnostic_motion`
-
-Uses adjacent-frame decoded temporal L1 as the actual training reward while
-still logging VideoAlign. This is a short systems-identification gate, not a
-quality experiment. It asks whether the RL substrate can move a simple
-measurable deterministic validation statistic at all.
-
-## Authoritative launcher
+## Authoritative files
 
 Use only:
 
 ```text
 modal_train_finite_transition_v2_complete.py
+fastvideo/train/methods/rl/finite_transition_v2_final.py
+examples/train/configs/rl/wan/finite_transition_*_v2_*.yaml
 ```
 
-The other v2 launcher files are implementation stepping stones and should not be
-used for new scientific jobs.
+The older `finite_transition_reliable*` and original FTPP files are preserved for
+history and ablation compatibility, not for new scientific jobs.
 
-## Required execution order
+## What v2 changes
 
-### 1. Easy learnability gate
+### Stronger rollout statistics
 
-```bash
-modal run modal_train_finite_transition_v2_complete.py \
-  --preset diagnostic_motion \
-  --max-train-steps 30 \
-  --validation-every 5 \
-  --validation-prompts 64 \
-  --comparison-id ftv2_motion_gate_s42
+The GRPO and posterior presets use:
+
+```text
+8 candidate trajectories per prompt group
+4 prompt groups per optimizer update
+4 stochastic finite transitions per trajectory
+32 reward-scored videos per optimizer update
+128 transition likelihood records per optimizer update
 ```
 
-Required outcome:
+Each transition is recomputed and backpropagated separately, so the code does
+not retain four full video-transformer graphs simultaneously.
 
-- raw deterministic temporal L1 responds in the optimized direction;
-- the post-update KL leaves the `1e-7` regime without NaN or collapse;
-- deterministic-preference alignment is positive on average;
-- MQ/VQ/TA and qualitative videos remain inspectable.
+Training uses the official AnyFlow five-segment map:
 
-If the raw deterministic motion metric does not move, stop. Audit ASFMC,
-log-probability scaling, adapter gradients, and deterministic transfer before
-using VideoAlign.
-
-### 2. Learning-rate to KL calibration
-
-```bash
-modal run modal_train_finite_transition_v2_complete.py \
-  --lr-sweep \
-  --validation-prompts 64 \
-  --comparison-id ftv2_grpo_lr_s42
+```text
+4 local-ASFMC stochastic transitions
+1 deterministic completion to x_0
 ```
 
-This runs 20-update GRPO jobs at:
+Deterministic evaluation remains the released four-step AnyFlow sampler.
+
+### Reward statistics that retain confidence
+
+GRPO uses a running prompt baseline and a reward scale pooled across the full
+optimizer rollout batch. Posterior weighting uses one global/EMA temperature,
+not forced per-group ESS.
+
+A nearly flat group therefore stays nearly uniform and causes a weak centered
+posterior update. `group_ess` remains an explicit ablation only.
+
+### Explicit policy-movement calibration
+
+Every optimizer step records:
+
+```text
+ftv2/post_update_approx_kl
+ftv2/post_update_logprob_delta_abs
+ftv2/loss_scale_before
+ftv2/loss_scale_after
+```
+
+A conservative controller changes the loss scale toward a target KL. The
+launcher also provides a controller-disabled learning-rate sweep at:
 
 ```text
 2e-6
@@ -247,12 +78,194 @@ This runs 20-update GRPO jobs at:
 6e-5
 ```
 
-with the target-KL controller disabled. Select the largest setting that gives
-stable raw deterministic behavior and post-update KL approximately in the
-`1e-5` to `1e-4` diagnostic band. This band is a starting probe, not a universal
-constant.
+The `1e-5` to `1e-4` KL range is an initial diagnostic band, not a universal
+constant. Select a setting from deterministic held-out behavior, not training
+reward alone.
 
-### 3. Establish a GRPO baseline that learns
+### Audited reward loading and upstream preprocessing
+
+Scientific VideoAlign configs use:
+
+```text
+videoalign_mq_audited
+videoalign_vq_audited
+videoalign_ta_audited
+```
+
+The audit:
+
+1. reads the actual full or adapter/non-LoRA checkpoint tensors;
+2. compares keys, shapes, tensor counts, and parameter counts against the final
+   runtime model;
+3. reports base, adapter, and reward-head coverage;
+4. requires a detected reward head;
+5. checks audited parameters for non-finite values; and
+6. runs a deterministic repeatability probe.
+
+MQ preprocessing matches the upstream wrapper exactly: mean-channel grayscale
+and an empty prompt. VQ uses color and an empty prompt. TA uses color and the
+actual generation prompt.
+
+Online training calls only MQ. VQ and TA are held out and evaluated only at fixed
+validation checkpoints, eliminating two unnecessary Qwen passes per rollout.
+
+### Raw and EMA paired validation
+
+Every validation checkpoint evaluates both:
+
+```text
+raw LoRA weights
+EMA weights
+```
+
+The evaluator stores exact `(prompt_index, sample_seed)` reward and motion values
+under:
+
+```text
+<output_dir>/paired_validation/
+  raw_step_XXXXXX_samples.json
+  ema_step_XXXXXX_samples.json
+```
+
+Statistical confidence intervals use prompt-level means across fixed seeds to
+avoid treating seeds from one prompt as independent prompts. JSON artifacts keep
+every seed value for debugging and cross-arm analysis.
+
+Logged statistics include:
+
+```text
+paired mean delta from step zero
+paired delta standard deviation and SEM
+paired bootstrap 95% interval
+raw and EMA practical-success gates
+```
+
+Never combine baseline and current SEMs as independent measurements when prompts
+and seeds are fixed.
+
+### Literal shared rollouts for objective-only comparison
+
+Standalone GRPO is on-policy:
+
+```yaml
+behavior_policy: on_policy
+```
+
+The `--paired` launcher forces both GRPO and posterior arms to:
+
+```yaml
+behavior_policy: frozen_base
+```
+
+LoRA is disabled only during rollout collection. With identical seeds, both
+learners receive the same prompts, source noise, ASFMC means, actions, completed
+videos, and rewards even after learner weights diverge. This is an off-policy
+objective-isolation experiment, not a claim that frozen behavior is the best
+online algorithm.
+
+### Stochastic-to-deterministic transfer diagnostics
+
+For a probe transition, v2 logs:
+
+```text
+ftv2/preferred_action_shift_rms
+ftv2/deterministic_map_shift_rms
+ftv2/deterministic_preference_alignment
+```
+
+The alignment is the cosine between the reward-preferred next-state direction
+and the actual post-update shift of AnyFlow's deterministic finite map. Positive
+within-group selection is not useful when deterministic alignment is zero or
+negative.
+
+## Objectives
+
+### `grpo`
+
+Resource-aware multi-transition Flow-Map GRPO using running reward statistics,
+32 rollout videos per update, and target-KL control.
+
+### `posterior`
+
+Identical rollout and trust-region substrate, but uses centered global-
+temperature Boltzmann weights instead of running-baseline advantages. This is the
+fair test of the original posterior-weighting idea.
+
+### `velocity`
+
+Uses frozen-base shared-state branches on one deployed transition. Candidate
+next states become finite velocities:
+
+```text
+g_j = (x_t - a_j) / Delta
+Delta_u = sum_j (w_j - 1/G) g_j
+u_target = u_behavior + eta * Delta_u
+```
+
+`eta` is capped by the desired deterministic next-state RMS change. The student
+receives ordinary stopped velocity regression, directly changing the finite map
+used at deterministic inference.
+
+### `diagnostic_luminance`
+
+Cheap 17-frame, 256x448 systems gate using mean luminance as both training and
+held-out reward. It has no VideoAlign dependency. This must learn before subtle
+VideoAlign failures are blamed on reward semantics.
+
+### `diagnostic_motion`
+
+Optional full-resolution systems gate optimizing decoded temporal L1 while
+logging audited VideoAlign MQ and holding VQ/TA out. Run it only after the cheaper
+luminance gate.
+
+## Required execution order
+
+### 1. Pull and run a real smoke
+
+```bash
+git fetch origin
+git switch adam/finite-transition-alignment
+git pull --ff-only origin adam/finite-transition-alignment
+
+modal run modal_train_finite_transition_v2_complete.py --smoke
+```
+
+A smoke proves environment, distributed, reward, optimizer, validation, and W&B
+plumbing only.
+
+### 2. Easy deterministic learnability gate
+
+```bash
+modal run modal_train_finite_transition_v2_complete.py \
+  --preset diagnostic_luminance \
+  --max-train-steps 30 \
+  --validation-every 5 \
+  --comparison-id ftv2_luminance_gate_s42
+```
+
+Required outcome:
+
+- raw deterministic held-out luminance increases;
+- EMA follows with expected lag;
+- post-update KL leaves the `1e-7` regime without NaN/collapse;
+- motion and diversity remain inspectable.
+
+If this fails, stop. Audit ASFMC, log-probability scale, LoRA gradients, and
+deterministic transfer before loading VideoAlign.
+
+### 3. Learning-rate / KL calibration
+
+```bash
+modal run modal_train_finite_transition_v2_complete.py \
+  --lr-sweep \
+  --validation-prompts 128 \
+  --comparison-id ftv2_grpo_lr_s42
+```
+
+The target-KL controller is disabled for these 20-update probes. Choose the
+largest stable learning rate with coherent raw deterministic behavior.
+
+### 4. Establish a GRPO baseline that learns
 
 ```bash
 modal run modal_train_finite_transition_v2_complete.py \
@@ -264,10 +277,10 @@ modal run modal_train_finite_transition_v2_complete.py \
   --comparison-id ftv2_grpo_baseline_s42
 ```
 
-Do not test a novel objective until raw or EMA paired held-out MQ shows a
-positive trend without unacceptable VQ/TA, motion, or diversity loss.
+Do not test a novel update rule until this baseline demonstrates positive raw or
+EMA paired held-out MQ without unacceptable VQ/TA, motion, or diversity loss.
 
-### 4. Compare posterior weighting only after step 3 succeeds
+### 5. Strict GRPO versus posterior comparison
 
 ```bash
 modal run modal_train_finite_transition_v2_complete.py \
@@ -279,18 +292,19 @@ modal run modal_train_finite_transition_v2_complete.py \
   --comparison-id ftv2_grpo_vs_posterior_s42
 ```
 
-The target-KL controller is enabled for both arms. Compare:
+Both arms use the frozen base behavior and receive identical rollout data.
+Compare matching exact sample artifacts with:
 
-```text
-paired raw and EMA MQ deltas
-paired FTPP-minus-GRPO interval
-reward gain per scored video
-reward gain per GPU-hour
-motion/diversity retention
-deterministic-preference alignment
+```bash
+python examples/train/compare_finite_transition_paired_runs.py \
+  --left <posterior-output>/paired_validation/ema_step_000100_samples.json \
+  --right <grpo-output>/paired_validation/ema_step_000100_samples.json \
+  --output outputs/ftv2_posterior_minus_grpo_step100.json
 ```
 
-### 5. Test deterministic velocity regression if likelihood methods tie
+The comparison orientation is `left - right`.
+
+### 6. Direct finite-velocity follow-up
 
 ```bash
 modal run modal_train_finite_transition_v2_complete.py \
@@ -301,7 +315,10 @@ modal run modal_train_finite_transition_v2_complete.py \
   --comparison-id ftv2_velocity_s42
 ```
 
-## W&B fields that must be checked
+Run this when likelihood objectives remain tied or stochastic-policy updates do
+not transfer to deterministic inference.
+
+## W&B fields to inspect
 
 Training:
 
@@ -338,44 +355,29 @@ Validation:
 ```text
 validation_raw/*
 validation_ema/*
+validation_paired_delta_raw/*
+validation_paired_ci95_low_raw/*
 validation_paired_delta/*
-validation_paired_sem/*
 validation_paired_ci95_low/*
-validation_paired_ci95_high/*
-validation_success/all_paired
 validation_success_raw/all_paired
+validation_success/all_paired
 ```
 
 ## Stop rules
 
-Stop a run early when any of these holds:
+Stop or repair the shared substrate when:
 
-- reward-model audit fails;
+- the luminance gate does not improve deterministically;
+- reward-model coverage or repeatability audit fails;
 - deterministic-preference alignment is persistently non-positive;
 - post-update KL remains below `1e-6` after the controller reaches a high loss
   scale;
-- training branch reward changes but raw deterministic held-out reward does not;
-- VQ/TA, motion, or diversity degrades materially;
-- the easy diagnostic reward cannot be learned;
+- training selection metrics rise while raw and EMA held-out reward stay flat;
+- VQ/TA, motion, or diversity degrade materially;
 - GRPO cannot demonstrate positive held-out movement under the stronger
   substrate.
 
 Do not run 1,200 updates solely because the process is numerically stable.
-
-## Result analysis
-
-After outputs are available:
-
-```bash
-python examples/train/analyze_finite_transition_v2_results.py \
-  --run-dir <grpo-output-dir> \
-  --label grpo \
-  --run-dir <posterior-output-dir> \
-  --label posterior \
-  --wandb-run adamlee00/finite-transition-v2-wan/<grpo-run-id> \
-  --wandb-run adamlee00/finite-transition-v2-wan/<posterior-run-id> \
-  --output-dir outputs/ftv2_analysis
-```
 
 ## Source-of-truth code
 
@@ -383,9 +385,10 @@ python examples/train/analyze_finite_transition_v2_results.py \
 fastvideo/train/methods/rl/common/finite_transition_v2.py
 fastvideo/train/methods/rl/rewards/videoalign_audit.py
 fastvideo/train/methods/rl/finite_transition_v2.py
-fastvideo/train/methods/rl/finite_transition_v2_paired.py
+fastvideo/train/methods/rl/finite_transition_v2_exact_paired.py
+fastvideo/train/methods/rl/finite_transition_v2_scientific.py
 fastvideo/train/methods/rl/finite_transition_v2_final.py
 examples/train/configs/rl/wan/finite_transition_*_v2_*.yaml
-examples/train/analyze_finite_transition_v2_results.py
+examples/train/compare_finite_transition_paired_runs.py
 modal_train_finite_transition_v2_complete.py
 ```
