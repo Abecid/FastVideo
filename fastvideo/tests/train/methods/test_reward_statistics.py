@@ -63,6 +63,16 @@ def test_target_kl_controller_moves_scale_in_correct_direction() -> None:
     assert down < up
 
 
+def test_target_kl_controller_does_not_escalate_zero_signal() -> None:
+    controller = TargetKLController(
+        target_kl=1.0e-5,
+        initial_scale=3.0,
+        max_adjustment=2.0,
+    )
+    assert controller.update(0.0) == pytest.approx(3.0)
+    assert controller.update(float("nan")) == pytest.approx(1.5)
+
+
 def test_paired_summary_detects_consistent_gain() -> None:
     baseline = torch.tensor([0.0, 1.0, 2.0, 3.0])
     current = baseline + 0.5
