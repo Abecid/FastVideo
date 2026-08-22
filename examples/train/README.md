@@ -83,18 +83,19 @@ training:
 ## RL Examples
 
 - DiffusionNFT Wan video RL: see `examples/train/diffusion_nft_wan_video.md`.
-- Reliable full-trajectory AnyFlow GRPO, paired posterior weighting,
-  target-KL calibration, raw/EMA paired validation, reward auditing, and
-  finite-velocity regression: see
-  `examples/train/finite_transition_reliable_experiment.md`.
-- The archived single-transition FTPP and matched Flow-Map-GRPO experiment: see
-  `examples/train/finite_transition_posterior_wan.md`.
-- **Mandatory pre-launch and runtime-repair guardrails** for FTPP coding agents:
-  see `examples/train/finite_transition_posterior_execution_guardrails.md`.
-- The first FTPP/GRPO run's schedule diagnosis and corrected rerun protocol: see
+- **Authoritative AnyFlow finite-transition v2 experiment and run order:**
+  `examples/train/finite_transition_v2_execution_plan.md`.
+- **Authoritative Modal launcher:**
+  `modal_train_finite_transition_v2_complete.py`.
+- Coding-agent guardrails covering scheduler, ASFMC, reward statistics,
+  target-KL calibration, reward auditing, paired validation, and stop rules:
+  `examples/train/finite_transition_posterior_execution_guardrails.md`.
+- The first FTPP/GRPO run's schedule diagnosis and corrected-run postmortem:
   `examples/train/finite_transition_posterior_postmortem.md`.
-- Coding-agent method context, rollout invariants, and W&B interpretation: see
-  `examples/train/finite_transition_posterior_agent_context.md`.
+- The original single-transition FTPP experiment is archived in
+  `examples/train/finite_transition_posterior_wan.md`.
+- The intermediate `finite_transition_reliable*` path is retained for historical
+  comparison; do not use it instead of v2 for new scientific runs.
 
 ## Directory Layout
 
