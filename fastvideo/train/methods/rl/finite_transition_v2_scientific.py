@@ -1,23 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Scientific finite-transition v2 entry point.
 
-This final subclass ensures raw and EMA validation dispatches through
-``FiniteTransitionV2PairedMethod._run_validation`` rather than the parent
-aggregate-only evaluator.
+Raw and EMA validation dispatch through the exact prompt-seed evaluator. Paired
+confidence intervals use prompt-level means, while every individual seed value
+is persisted for objective-arm comparisons and debugging.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastvideo.train.methods.base import LogScalar
-from fastvideo.train.methods.rl.finite_transition_v2_paired import (
-    FiniteTransitionV2PairedMethod,
+from fastvideo.train.methods.rl.finite_transition_v2_exact_paired import (
+    FiniteTransitionV2ExactPairedMethod,
 )
 
 
-class FiniteTransitionV2ScientificMethod(FiniteTransitionV2PairedMethod):
-    """V2 optimization with paired fixed-seed raw/EMA validation."""
+class FiniteTransitionV2ScientificMethod(FiniteTransitionV2ExactPairedMethod):
+    """V2 optimization with exact fixed-seed raw/EMA validation."""
 
     def on_validation_begin(
         self,
