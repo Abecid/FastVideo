@@ -24,7 +24,7 @@ models:
         - ffn.fc_out
 
 method:
-  _target_: fastvideo.train.methods.rl.finite_transition_reliable.ReliableFiniteTransitionMethod
+  _target_: fastvideo.train.methods.rl.finite_transition_reliable_audited.AuditedReliableFiniteTransitionMethod
   objective: flowmap_grpo
   require_train_eval_schedule_match: false
   train_map_steps: 5
