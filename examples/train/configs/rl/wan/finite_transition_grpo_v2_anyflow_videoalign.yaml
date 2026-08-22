@@ -24,7 +24,7 @@ models:
         - ffn.fc_out
 
 method:
-  _target_: fastvideo.train.methods.rl.finite_transition_v2.FiniteTransitionV2Method
+  _target_: fastvideo.train.methods.rl.finite_transition_v2_final.FiniteTransitionV2FinalMethod
   objective: flowmap_grpo
   v2_objective: flowmap_grpo
 
