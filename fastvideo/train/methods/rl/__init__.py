@@ -8,9 +8,13 @@ from fastvideo.train.methods.rl.finite_transition_posterior import (
 from fastvideo.train.methods.rl.finite_transition_posterior_repro import (
     ReproducibleFiniteTransitionPosteriorMethod,
 )
+from fastvideo.train.methods.rl.finite_transition_reliable import (
+    ReliableFiniteTransitionMethod,
+)
 
 __all__ = [
     "DiffusionNFTMethod",
     "FiniteTransitionPosteriorMethod",
+    "ReliableFiniteTransitionMethod",
     "ReproducibleFiniteTransitionPosteriorMethod",
 ]
