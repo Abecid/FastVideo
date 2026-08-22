@@ -1,0 +1,158 @@
+# Cheap learnability gate for the finite-transition RL substrate.
+#
+# This is not a quality experiment. It asks whether ASFMC rollouts, likelihoods,
+# LoRA gradients, target-KL calibration, and deterministic AnyFlow validation can
+# optimize an unambiguous scalar at all. Do not spend on VideoAlign training if
+# this short run cannot increase held-out mean luminance.
+
+models:
+  student:
+    _target_: fastvideo.train.models.wan.WanModel
+    init_from: nvidia/AnyFlow-Wan2.1-T2V-1.3B-Diffusers
+    trainable: true
+    flow_shift: 5.0
+    lora:
+      enable: true
+      rank: 32
+      alpha: 64
+      target_modules:
+        - to_q
+        - to_k
+        - to_v
+        - to_out
+        - ffn.fc_in
+        - ffn.fc_out
+
+method:
+  _target_: fastvideo.train.methods.rl.finite_transition_v2_final.FiniteTransitionV2FinalMethod
+  objective: flowmap_grpo
+  v2_objective: flowmap_grpo
+
+  require_train_eval_schedule_match: false
+  train_map_steps: 5
+  eval_map_steps: 4
+  stochastic_steps: 4
+  transition_mode: all
+  group_size: 8
+  rollout_groups_per_update: 4
+  behavior_policy: on_policy
+
+  anchor_type: local
+  local_anchor_delta: 0.03
+  local_noise_scale: 0.7
+  local_terminal_base_sigma: 0.05
+  flow_shift: 5.0
+
+  reward_std_decay: 0.90
+  reward_std_floor: 0.001
+  initial_reward_std: 0.02
+  advantage_clip: 5.0
+  advantage_epsilon: 0.000001
+  clip_range: 0.02
+
+  target_post_update_kl: 0.00003
+  kl_controller_rate: 0.25
+  initial_loss_scale: 1.0
+  minimum_loss_scale: 0.1
+  maximum_loss_scale: 100.0
+  max_grad_norm: 1.0
+
+  posterior_temperature_mode: global_std
+  posterior_temperature_multiplier: 1.0
+  posterior_min_temperature: 0.0001
+  target_ess_ratio: 0.50
+  reward_bisection_steps: 40
+
+  reward_backend: auto
+  optimize_reward: mean_luminance
+  diagnostic_reward: none
+  reward_fn:
+    rewards:
+      mean_luminance: 1.0
+
+  videoalign_audit:
+    enabled: false
+
+  validation:
+    every_steps: 5
+    num_steps: 4
+    num_prompts: 32
+    batch_size: 1
+    log_samples: true
+    max_samples: 8
+    fps: 16
+    seed: 42
+    data_path:
+
+  validate_raw_model: true
+  validate_ema_model: true
+  evaluation:
+    samples_per_prompt: 2
+    static_temporal_l1_threshold: 0.001
+    primary_min_delta: 0.01
+    significance_z: 1.96
+    min_motion_ratio: 0.70
+    min_latent_diversity_ratio: 0.50
+    heldout_max_drop: {}
+
+  ema:
+    enabled: true
+    decay: 0.90
+    update_after_step: 0
+    validation: true
+  ema_update_interval: 4
+  terminal_progress: true
+  attn_kind: dense
+
+training:
+  distributed:
+    num_gpus: 4
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 4
+
+  data:
+    data_path: data/finite_transition_posterior/train/combined_parquet_dataset
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 2
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 5
+    num_height: 256
+    num_width: 448
+    num_frames: 17
+
+  optimizer:
+    learning_rate: 0.00002
+    betas: [0.9, 0.999]
+    weight_decay: 0.0001
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+
+  loop:
+    max_train_steps: 30
+    gradient_accumulation_steps: 1
+
+  checkpoint:
+    output_dir: outputs/wan_anyflow_grpo_v2_diagnostic_luminance
+    training_state_checkpointing_steps: 10
+    checkpoints_total_limit: 4
+    resume_from_checkpoint:
+
+  tracker:
+    entity: adamlee00
+    project_name: finite-transition-v2-wan
+    run_name: anyflow_grpo_v2_diagnostic_luminance
+
+  model:
+    enable_gradient_checkpointing_type: full
+
+pipeline:
+  flow_shift: 5.0
+  dit_config:
+    r_embedder: true
+    r_embedder_fusion: gated
+    r_embedder_gate_value: 0.25
+    r_embedder_deltatime_type: r
