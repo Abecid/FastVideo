@@ -40,15 +40,26 @@ from modal_train_finite_transition_posterior import (
 app = modal.App("fastvideo-finite-transition-reliable")
 OUTPUT_ROOT = f"{PROJECT_ROOT}/outputs/finite_transition_reliable"
 
-image = base_image.run_commands(
-    "cd /root/FastVideo && python -m compileall -q "
-    "fastvideo/train/methods/rl/common/reward_statistics.py "
-    "fastvideo/train/methods/rl/finite_transition_paired_validation.py "
-    "fastvideo/train/methods/rl/finite_transition_reliable.py "
-    "fastvideo/train/methods/rl/rewards/videoalign_audit.py "
-    "examples/train/prepare_finite_transition_reliable_assets.py "
-    "examples/train/audit_videoalign_checkpoint.py "
-    "modal_train_finite_transition_reliable.py"
+image = (
+    base_image.run_commands(
+        "cd /root/FastVideo && python -m compileall -q "
+        "fastvideo/train/methods/rl/common/reward_statistics.py "
+        "fastvideo/train/methods/rl/finite_transition_paired_validation.py "
+        "fastvideo/train/methods/rl/finite_transition_reliable.py "
+        "fastvideo/train/methods/rl/finite_transition_reliable_calibrated.py "
+        "fastvideo/train/methods/rl/finite_transition_reliable_audited.py "
+        "fastvideo/train/methods/rl/rewards/videoalign_audit.py "
+        "examples/train/prepare_finite_transition_reliable_assets.py "
+        "examples/train/prepare_finite_transition_reliable_run.py "
+        "examples/train/audit_videoalign_checkpoint.py "
+        "modal_train_finite_transition_reliable.py"
+    )
+    .env(
+        {
+            "VIDEOALIGN_MIN_OVERALL_COVERAGE": "0.90",
+            "VIDEOALIGN_MIN_HEAD_COVERAGE": "0.99",
+        }
+    )
 )
 
 
@@ -94,6 +105,14 @@ def _defaults(recipe: str) -> dict[str, int | float]:
         "height": 480,
         "width": 832,
     }
+
+
+def _effective_objective(recipe: str, objective: str) -> str:
+    if recipe == "velocity":
+        return "finite_velocity_regression"
+    if recipe == "sanity":
+        return "flowmap_grpo"
+    return objective
 
 
 def _complete_qwen_snapshot() -> str:
@@ -223,22 +242,24 @@ def train(
             60,
         )
 
+    effective_objective = _effective_objective(recipe, objective)
     repo = Path(PROJECT_ROOT)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     comparison_id = comparison_id.strip() or (
-        f"ftr_{recipe}_{objective}_s{seed}_{timestamp}"
+        f"ftr_{recipe}_{effective_objective}_s{seed}_{timestamp}"
     )
     run_name = run_name_override.strip() or (
-        f"anyflow_{recipe}_{objective}_g{group_size}_a{rollout_groups}_"
-        f"s{seed}_{timestamp}"
+        f"anyflow_{recipe}_{effective_objective}_g{group_size}_"
+        f"a{rollout_groups}_s{seed}_{timestamp}"
     )
     output_dir = f"{OUTPUT_ROOT}/{run_name}"
     run_config_dir = f"{PROJECT_ROOT}/outputs/ftr_run_configs/{run_name}"
 
     os.environ["WANDB_RUN_GROUP"] = comparison_id
-    os.environ["WANDB_JOB_TYPE"] = f"{recipe}:{objective}"
+    os.environ["WANDB_JOB_TYPE"] = f"{recipe}:{effective_objective}"
     os.environ["WANDB_TAGS"] = (
-        f"finite-transition-reliable,anyflow,{recipe},{objective},seed-{seed}"
+        "finite-transition-reliable,anyflow,"
+        f"{recipe},{effective_objective},seed-{seed}"
     )
     if resume_from_checkpoint:
         os.environ["WANDB_RESUME"] = "allow"
@@ -264,6 +285,7 @@ def train(
         "fastvideo/tests/train/methods/test_finite_transition_posterior_repro.py",
         "fastvideo/tests/train/methods/test_reward_statistics.py",
         "fastvideo/tests/train/methods/test_finite_transition_reliable.py",
+        "fastvideo/tests/train/methods/test_finite_transition_reliable_configs.py",
         "fastvideo/tests/train/methods/test_videoalign_audit.py",
     ]
     subprocess.run(
@@ -316,7 +338,7 @@ def train(
     prep_cmd = [
         sys.executable,
         "-m",
-        "examples.train.prepare_finite_transition_reliable_assets",
+        "examples.train.prepare_finite_transition_reliable_run",
         "--recipe",
         recipe,
         "--objective",
@@ -409,6 +431,8 @@ def train(
     summary = json.loads(completed.stdout.strip().splitlines()[-1])
 
     if recipe != "sanity":
+        # The preparation check has now completed the immutable Qwen snapshot.
+        os.environ["VIDEOALIGN_BASE_MODEL_PATH"] = _complete_qwen_snapshot()
         subprocess.run(
             [
                 sys.executable,
@@ -430,7 +454,7 @@ def train(
 
     result: dict[str, str | int | float | bool] = {
         "recipe": recipe,
-        "objective": objective,
+        "objective": effective_objective,
         "comparison_id": comparison_id,
         "run_name": run_name,
         "output_dir": output_dir,
@@ -531,6 +555,8 @@ def main(
 ) -> None:
     if paired and calibrate_kl:
         raise ValueError("paired and calibrate-kl are mutually exclusive")
+    if (paired or calibrate_kl) and recipe != "reliable":
+        raise ValueError("paired and calibrate-kl require --recipe reliable")
     if (paired or calibrate_kl) and resume_from_checkpoint:
         raise ValueError("multi-run modes do not accept one shared checkpoint")
 
@@ -589,7 +615,10 @@ def main(
                 behavior_policy="base_adapter_disabled",
                 prepare_only=False,
                 skip_preprocess=True,
-                run_name_override="",
+                run_name_override=(
+                    f"anyflow_reliable_{arm}_shared_behavior_"
+                    f"s{seed}_{timestamp}"
+                ),
             )
             jobs.append(train.spawn(**kwargs))
         errors = []
@@ -617,6 +646,7 @@ def main(
             return
         jobs = []
         for candidate_target in (1.0e-6, 1.0e-5, 1.0e-4):
+            target_label = f"{candidate_target:.0e}".replace("-", "m")
             kwargs = dict(common)
             kwargs.update(
                 objective="flowmap_grpo",
@@ -626,7 +656,10 @@ def main(
                 validation_every=20,
                 prepare_only=False,
                 skip_preprocess=True,
-                run_name_override="",
+                run_name_override=(
+                    f"anyflow_reliable_grpo_targetkl_{target_label}_"
+                    f"s{seed}_{timestamp}"
+                ),
             )
             jobs.append(train.spawn(**kwargs))
         errors = []
