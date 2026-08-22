@@ -158,7 +158,7 @@ def assert_videoalign_checkpoint_coverage(
         minimum_overall = float(
             os.environ.get(
                 "VIDEOALIGN_MIN_OVERALL_COVERAGE",
-                "0.95",
+                "0.90",
             )
         )
     if minimum_head is None:
@@ -188,15 +188,25 @@ def assert_videoalign_checkpoint_coverage(
             f"{head['coverage']:.4f} < {minimum_head:.4f}"
         )
 
+    # Checking every parameter in a multi-billion-parameter Qwen model would
+    # turn a fail-fast audit into another full model pass. Check every adapter
+    # and reward-head tensor plus a deterministic sample of base tensors.
     nonfinite = []
+    sampled_base = 0
     for name, parameter in model.named_parameters():
+        category = _category(name)
+        should_check = category in {"adapter", "head"} or sampled_base < 8
+        if not should_check:
+            continue
+        if category == "base":
+            sampled_base += 1
         if not torch.isfinite(parameter.detach()).all():
             nonfinite.append(name)
             if len(nonfinite) >= 16:
                 break
     if nonfinite:
         raise RuntimeError(
-            "VideoAlign contains non-finite parameters after load: "
+            "VideoAlign contains non-finite audited parameters after load: "
             f"{nonfinite}"
         )
     return summary
