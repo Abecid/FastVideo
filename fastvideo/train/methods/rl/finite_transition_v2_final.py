@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Final scientific entry point for finite-transition v2.
 
-This class adds rank-safe VideoAlign auditing, clean raw/EMA paired metric
-namespaces, and a paired aggregate success gate on top of the v2 optimizer and
-paired evaluator.
+This class adds rank-safe VideoAlign auditing, separate online/held-out reward
+stacks, clean raw/EMA paired metric namespaces, and a paired aggregate success
+gate on top of the v2 optimizer and paired evaluator.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from fastvideo.train.methods.base import LogScalar
 from fastvideo.train.methods.rl.finite_transition_v2_scientific import (
     FiniteTransitionV2ScientificMethod,
+)
+from fastvideo.train.methods.rl.rewards import (
+    build_multi_reward_scorer,
+    normalize_reward_weights,
 )
 from fastvideo.train.methods.rl.rewards.videoalign_audit import (
     audit_videoalign_checkpoint,
@@ -24,6 +29,32 @@ from fastvideo.train.methods.rl.rewards.videoalign_audit import (
 
 class FiniteTransitionV2FinalMethod(FiniteTransitionV2ScientificMethod):
     """Audited v2 optimization with paired raw/EMA validation."""
+
+    def __init__(
+        self,
+        *,
+        cfg: Any,
+        role_models: dict[str, Any],
+    ) -> None:
+        super().__init__(cfg=cfg, role_models=role_models)
+        mcfg = self.method_config
+        raw_validation_reward = mcfg.get("validation_reward_fn")
+        if raw_validation_reward is None:
+            self._validation_reward_fn_config = dict(self._reward_fn_config)
+            self._validation_reward_backend = self._reward_backend
+        else:
+            (
+                self._validation_reward_fn_config,
+                inline_backend,
+            ) = normalize_reward_weights(raw_validation_reward)
+            self._validation_reward_backend = str(
+                mcfg.get(
+                    "validation_reward_backend",
+                    inline_backend or self._reward_backend,
+                )
+                or self._reward_backend
+            ).strip().lower()
+        self._validation_reward_scorer: Any | None = None
 
     def on_train_start(self) -> None:
         # The base v2 class can perform the same audit, but it would let every
@@ -36,6 +67,19 @@ class FiniteTransitionV2FinalMethod(FiniteTransitionV2ScientificMethod):
             super().on_train_start()
         finally:
             self._videoalign_audit_enabled = enabled
+
+        if (
+            self._validation_reward_fn_config == self._reward_fn_config
+            and self._validation_reward_backend == self._reward_backend
+        ):
+            self._validation_reward_scorer = self._reward_scorer
+        else:
+            self._validation_reward_scorer = build_multi_reward_scorer(
+                self._validation_reward_fn_config,
+                backend=self._validation_reward_backend,
+                device=self.student.device,
+            )
+
         if not enabled:
             return
 
@@ -76,10 +120,11 @@ class FiniteTransitionV2FinalMethod(FiniteTransitionV2ScientificMethod):
                 f"audit/videoalign_{name}_numel_coverage"
             ] = float(component["numel_ratio"])
 
-        if self._reward_scorer is None:
+        audit_scorer = self._validation_reward_scorer or self._reward_scorer
+        if audit_scorer is None:
             raise RuntimeError("reward scorer was not initialized")
         repeat = repeatability_probe(
-            self._reward_scorer,
+            audit_scorer,
             device=self.student.device,
             tolerance=self._videoalign_repeat_tolerance,
         )
@@ -120,14 +165,30 @@ class FiniteTransitionV2FinalMethod(FiniteTransitionV2ScientificMethod):
         self,
         iteration: int = 0,
     ) -> dict[str, LogScalar]:
-        metrics = super().on_validation_begin(iteration)
+        config = self._validation_config
+        if config.every_steps <= 0 or iteration % config.every_steps != 0:
+            return {}
+
+        training_scorer = self._reward_scorer
+        if self._validation_reward_scorer is not None:
+            self._reward_scorer = self._validation_reward_scorer
+        try:
+            metrics = super().on_validation_begin(iteration)
+        finally:
+            self._reward_scorer = training_scorer
         if not metrics:
             return metrics
 
-        paired_primary = float(metrics.get("validation_success/primary_paired", 0.0))
-        heldout = float(metrics.get("validation_success/heldout_retained", 0.0))
+        paired_primary = float(
+            metrics.get("validation_success/primary_paired", 0.0)
+        )
+        heldout = float(
+            metrics.get("validation_success/heldout_retained", 0.0)
+        )
         motion = float(metrics.get("validation_success/motion_retained", 0.0))
-        diversity = float(metrics.get("validation_success/diversity_retained", 0.0))
+        diversity = float(
+            metrics.get("validation_success/diversity_retained", 0.0)
+        )
         metrics["validation_success/all_paired"] = float(
             paired_primary > 0.5
             and heldout > 0.5
