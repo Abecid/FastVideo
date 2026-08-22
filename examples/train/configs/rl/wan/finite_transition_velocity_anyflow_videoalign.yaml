@@ -23,7 +23,7 @@ models:
         - ffn.fc_out
 
 method:
-  _target_: fastvideo.train.methods.rl.finite_transition_reliable.ReliableFiniteTransitionMethod
+  _target_: fastvideo.train.methods.rl.finite_transition_reliable_audited.AuditedReliableFiniteTransitionMethod
   objective: finite_velocity_regression
 
   # Reward-correct exactly the deterministic transition pairs used by four-step
@@ -81,6 +81,10 @@ method:
   reward_backend: genrl
   optimize_reward: videoalign_mq_audited
   reward_fn:
+    rewards:
+      videoalign_mq_audited: 1.0
+  validation_reward_backend: genrl
+  validation_reward_fn:
     rewards:
       videoalign_mq_audited: 1.0
       videoalign_vq_audited: 1.0
