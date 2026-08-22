@@ -187,7 +187,7 @@ class PromptRewardNormalizer:
 
 
 class TargetKLController:
-    """Multiplicative loss-scale controller driven by measured post-update KL."""
+    """Multiplicative loss-scale controller driven by incremental update KL."""
 
     def __init__(
         self,
@@ -214,8 +214,15 @@ class TargetKLController:
     def update(self, measured_kl: float | torch.Tensor) -> float:
         value = float(torch.as_tensor(measured_kl).detach().float())
         self.last_kl = value
-        if not math.isfinite(value) or value <= 0.0:
-            adjustment = self.max_adjustment
+        if not math.isfinite(value):
+            # A non-finite probe is a stability failure, never a reason to make
+            # the next update larger.
+            adjustment = 1.0 / self.max_adjustment
+        elif value <= 1.0e-16:
+            # Exactly zero commonly means an equal-reward/no-gradient group or
+            # a skipped probe. Preserve the current scale instead of escalating
+            # toward the maximum without evidence.
+            adjustment = 1.0
         else:
             adjustment = math.sqrt(self.target_kl / value)
             adjustment = min(
