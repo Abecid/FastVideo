@@ -93,8 +93,10 @@ def check_config(path: Path) -> dict[str, Any]:
         raise RuntimeError("Released AnyFlow scientific configs require shift 5")
 
     eval_schedule = anyflow_inference_schedule(
-        steps=eval_steps,
-        flow_shift=float(pipeline.flow_shift),
+        num_steps=eval_steps,
+        shift=float(pipeline.flow_shift),
+        num_train_timesteps=1000,
+        device="cpu",
     )
     if eval_steps == 4:
         expected = [1000.0, 937.5, 833.3333333333, 625.0, 0.0]
