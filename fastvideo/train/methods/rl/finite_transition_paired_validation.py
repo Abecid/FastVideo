@@ -159,7 +159,7 @@ class PairedFiniteTransitionValidationMixin:
             )
             sample_key = torch.tensor(
                 [
-                    int(meta[0]) * 1_000_000 + int(meta[2])
+                    int(meta[0]) * 1_000 + int(meta[2])
                     for meta in expanded_meta
                 ],
                 device=self.student.device,
@@ -223,21 +223,21 @@ class PairedFiniteTransitionValidationMixin:
             return {}, {}, []
 
         sample_mask = self._all_gather_1d(
-            torch.cat(local_sample_masks).float()
+            torch.cat(local_sample_masks)
         ).bool()
         sample_keys = self._all_gather_1d(
-            torch.cat(local_sample_keys).float()
+            torch.cat(local_sample_keys)
         ).long()[sample_mask]
         sample_seeds = self._all_gather_1d(
-            torch.cat(local_sample_seeds).float()
+            torch.cat(local_sample_seeds)
         ).long()[sample_mask]
         sample_order = torch.argsort(sample_keys)
 
         prompt_mask = self._all_gather_1d(
-            torch.cat(local_prompt_masks).float()
+            torch.cat(local_prompt_masks)
         ).bool()
         prompt_indices = self._all_gather_1d(
-            torch.cat(local_prompt_indices).float()
+            torch.cat(local_prompt_indices)
         ).long()[prompt_mask]
         prompt_order = torch.argsort(prompt_indices)
 
