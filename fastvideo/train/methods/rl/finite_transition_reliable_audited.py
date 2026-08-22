@@ -88,6 +88,10 @@ class AuditedReliableFiniteTransitionMethod(
         self,
         iteration: int = 0,
     ) -> dict[str, LogScalar]:
+        config = self._validation_config
+        if config.every_steps <= 0 or iteration % config.every_steps != 0:
+            return {}
+
         original_scorer = self._reward_scorer
         if self._validation_reward_scorer is not None:
             self._reward_scorer = self._validation_reward_scorer
