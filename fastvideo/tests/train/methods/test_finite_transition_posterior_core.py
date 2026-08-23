@@ -10,6 +10,7 @@ from fastvideo.train.methods.rl.common.anyflow_schedule import (
 )
 from fastvideo.train.methods.rl.common.finite_transition import (
     append_data_endpoint,
+    diagonal_gaussian_kl_mean,
     endpoint_anchor_parameters,
     gaussian_log_prob_mean,
     group_advantages,
@@ -146,6 +147,30 @@ def test_mean_gaussian_log_prob_preserves_small_bfloat16_policy_shift() -> None:
     assert float(delta.abs()) > 1.0e-5
     expected = -0.5 * float(mean_after[0, 0]) ** 2
     assert float(delta) == pytest.approx(expected, rel=2.0e-2)
+
+
+def test_diagonal_gaussian_kl_preserves_small_bfloat16_policy_shift() -> None:
+    reference_mean = torch.zeros((2, 4096), dtype=torch.bfloat16)
+    updated_mean = torch.full_like(reference_mean, 0.01)
+    std = torch.ones((2, 1), dtype=torch.bfloat16)
+
+    kl = diagonal_gaussian_kl_mean(
+        reference_mean,
+        std,
+        updated_mean,
+        std,
+    )
+
+    expected = 0.5 * float(updated_mean[0, 0]) ** 2
+    assert kl.dtype == torch.float32
+    assert kl.shape == (2,)
+    assert torch.all(kl > 1.0e-5)
+    assert torch.allclose(
+        kl,
+        torch.full_like(kl, expected),
+        rtol=1.0e-4,
+        atol=1.0e-8,
+    )
 
 
 def test_group_advantages_are_centered_and_clipped() -> None:

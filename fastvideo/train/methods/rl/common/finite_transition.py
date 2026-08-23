@@ -120,6 +120,42 @@ def gaussian_log_prob_mean(
     return log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
 
 
+def diagonal_gaussian_kl_mean(
+    reference_mean: torch.Tensor,
+    reference_std: torch.Tensor,
+    updated_mean: torch.Tensor,
+    updated_std: torch.Tensor,
+) -> torch.Tensor:
+    """Coordinate-normalized KL from a reference to an updated policy.
+
+    Computing KL from a sampled, dimension-averaged log-probability delta can
+    cancel positive and negative coordinate contributions. The analytic
+    diagonal-Gaussian expression stays non-negative and remains comparable
+    across latent resolutions by averaging all non-batch dimensions.
+    """
+    if reference_mean.shape != updated_mean.shape:
+        raise ValueError("reference and updated mean shapes must match")
+    if torch.any(reference_std <= 0) or torch.any(updated_std <= 0):
+        raise ValueError("standard deviations must be strictly positive")
+
+    reference_mean_float = reference_mean.detach().float()
+    updated_mean_float = updated_mean.float()
+    reference_std_float = reference_std.detach().float()
+    updated_std_float = updated_std.float()
+    mean_delta = reference_mean_float - updated_mean_float
+    log_std_ratio = torch.log(updated_std_float) - torch.log(reference_std_float)
+    variance_ratio_minus_one = torch.expm1(-2.0 * log_std_ratio)
+    kl = (
+        log_std_ratio
+        + 0.5
+        * (
+            variance_ratio_minus_one
+            + mean_delta.square() / updated_std_float.square()
+        )
+    )
+    return kl.mean(dim=tuple(range(1, kl.ndim)))
+
+
 def group_advantages(
     rewards: torch.Tensor,
     *,

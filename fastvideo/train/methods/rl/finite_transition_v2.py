@@ -41,6 +41,7 @@ from fastvideo.pipelines import TrainingBatch
 from fastvideo.train.methods.base import LogScalar
 from fastvideo.train.methods.rl.common.finite_transition import (
     clipped_grpo_loss,
+    diagonal_gaussian_kl_mean,
     gaussian_log_prob_mean,
     posterior_projection_loss,
     reward_tilted_weights,
@@ -728,6 +729,8 @@ class FiniteTransitionV2Method(ReproducibleFiniteTransitionPosteriorMethod):
                 if probe is None and pre_log_prob is not None:
                     probe = {
                         "record": record,
+                        "pre_mean": new_mean.detach(),
+                        "pre_std": new_std.detach(),
                         "pre_log_prob": pre_log_prob,
                         "pre_deterministic": pre_deterministic.detach(),
                         "preferred_shift": self._global_centered_action_shift(
@@ -765,7 +768,14 @@ class FiniteTransitionV2Method(ReproducibleFiniteTransitionPosteriorMethod):
                     post_std,
                 )
                 delta_log_prob = post_log_prob - probe["pre_log_prob"]
-                observed_kl = float(0.5 * delta_log_prob.square().mean().item())
+                observed_kl = float(
+                    diagonal_gaussian_kl_mean(
+                        probe["pre_mean"],
+                        probe["pre_std"],
+                        post_mean,
+                        post_std,
+                    ).mean().item()
+                )
                 logprob_delta = float(delta_log_prob.abs().mean().item())
                 map_shift = post_deterministic.float() - probe["pre_deterministic"].float()
                 preferred = probe["preferred_shift"].to(map_shift.device)
