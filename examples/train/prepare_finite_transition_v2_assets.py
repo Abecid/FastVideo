@@ -9,6 +9,9 @@ while resolving the actual v2 reward backends correctly.
 
 from __future__ import annotations
 
+from copy import deepcopy
+from typing import Any
+
 from examples.train import prepare_finite_transition_posterior_assets as _base
 
 _AUDITED_VIDEOALIGN = {
@@ -21,6 +24,38 @@ _NATIVE_DEBUG = {
     "jpeg_compressibility",
     "jpeg_incompressibility",
 }
+
+_ATOMIC_METHOD_FIELDS = (
+    "reward_backend",
+    "reward_fn",
+    "optimize_reward",
+    "validation_reward_backend",
+    "validation_reward_fn",
+    "videoalign_audit",
+)
+
+
+def merge_generated_with_preset(
+    generated: dict[str, Any],
+    preset: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge prepared paths with a v2 preset without combining scorer maps."""
+
+    def deep_merge(left: Any, right: Any) -> Any:
+        if isinstance(left, dict) and isinstance(right, dict):
+            result = deepcopy(left)
+            for key, value in right.items():
+                result[key] = deep_merge(result.get(key), value)
+            return result
+        return deepcopy(right)
+
+    merged = deep_merge(generated, preset)
+    preset_method = preset.get("method", {})
+    merged_method = merged.setdefault("method", {})
+    for key in _ATOMIC_METHOD_FIELDS:
+        if key in preset_method:
+            merged_method[key] = deepcopy(preset_method[key])
+    return merged
 
 
 def resolve_reward_setup(

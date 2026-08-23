@@ -303,6 +303,7 @@ def train(
             "fastvideo/tests/train/methods/test_local_asfmc.py",
             "fastvideo/tests/train/methods/test_finite_transition_posterior_core.py",
             "fastvideo/tests/train/methods/test_finite_transition_v2_core.py",
+            "fastvideo/tests/train/methods/test_finite_transition_v2_configs.py",
             "fastvideo/tests/train/methods/test_finite_transition_v2_method.py",
             "fastvideo/tests/train/methods/test_videoalign_audit.py",
             "fastvideo/tests/train/methods/test_compare_finite_transition_paired_runs.py",
@@ -352,11 +353,15 @@ def train(
         if preset in {"grpo", "diagnostic_luminance", "diagnostic_motion"}
         else "posterior_projection"
     )
-    preparation_reward = "mean_luminance" if preset == "diagnostic_luminance" else "videoalign_mq"
+    preparation_reward = (
+        "mean_luminance"
+        if preset == "diagnostic_luminance"
+        else "videoalign_mq_audited"
+    )
     prep_cmd = [
         sys.executable,
         "-m",
-        "examples.train.prepare_finite_transition_posterior_assets",
+        "examples.train.prepare_finite_transition_v2_assets",
         "--repo-root",
         str(repo),
         "--config",
@@ -437,17 +442,13 @@ def train(
         Path(str(summary["run_config"])).read_text(encoding="utf-8")
     )
 
-    def deep_merge(left, right):
-        if isinstance(left, dict) and isinstance(right, dict):
-            result = dict(left)
-            for key, value in right.items():
-                result[key] = deep_merge(result.get(key), value)
-            return result
-        return right
-
     data_path = generated["training"]["data"]["data_path"]
     validation_path = generated["method"]["validation"]["data_path"]
-    merged = deep_merge(generated, preset_cfg)
+    from examples.train.prepare_finite_transition_v2_assets import (
+        merge_generated_with_preset,
+    )
+
+    merged = merge_generated_with_preset(generated, preset_cfg)
     merged["method"]["_target_"] = (
         "fastvideo.train.methods.rl.finite_transition_v2_final."
         "FiniteTransitionV2FinalMethod"

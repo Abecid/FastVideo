@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from examples.train.prepare_finite_transition_v2_assets import (
+    merge_generated_with_preset,
+)
 from fastvideo.train.utils.config import load_run_config
 
 FINAL_TARGET = (
@@ -102,3 +105,53 @@ def test_luminance_gate_has_no_videoalign_dependency() -> None:
     assert set(method["reward_fn"]["rewards"]) == {"mean_luminance"}
     assert method["videoalign_audit"]["enabled"] is False
     assert cfg.training.data.num_frames == 17
+
+
+def test_v2_merge_replaces_legacy_reward_maps_atomically() -> None:
+    generated = {
+        "method": {
+            "optimize_reward": "videoalign_mq",
+            "reward_fn": {
+                "rewards": {
+                    "videoalign_mq": 1.0,
+                    "videoalign_vq": 1.0,
+                    "videoalign_ta": 1.0,
+                }
+            },
+            "validation_reward_fn": {
+                "rewards": {"videoalign_mq": 1.0}
+            },
+            "validation": {"data_path": "/prepared/validation"},
+        }
+    }
+    preset = {
+        "method": {
+            "optimize_reward": "videoalign_mq_audited",
+            "reward_fn": {
+                "rewards": {"videoalign_mq_audited": 1.0}
+            },
+            "validation_reward_fn": {
+                "rewards": {
+                    "videoalign_mq_audited": 1.0,
+                    "videoalign_vq_audited": 1.0,
+                    "videoalign_ta_audited": 1.0,
+                }
+            },
+            "validation": {"num_prompts": 128},
+        }
+    }
+
+    merged = merge_generated_with_preset(generated, preset)
+
+    assert set(merged["method"]["reward_fn"]["rewards"]) == {
+        "videoalign_mq_audited"
+    }
+    assert set(merged["method"]["validation_reward_fn"]["rewards"]) == {
+        "videoalign_mq_audited",
+        "videoalign_vq_audited",
+        "videoalign_ta_audited",
+    }
+    assert merged["method"]["validation"]["data_path"] == (
+        "/prepared/validation"
+    )
+    assert merged["method"]["validation"]["num_prompts"] == 128
