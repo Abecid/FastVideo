@@ -301,6 +301,7 @@ def train(
             "-q",
             "fastvideo/tests/train/methods/test_anyflow_schedule.py",
             "fastvideo/tests/train/methods/test_local_asfmc.py",
+            "fastvideo/tests/train/methods/test_finite_transition_posterior_core.py",
             "fastvideo/tests/train/methods/test_finite_transition_v2_core.py",
             "fastvideo/tests/train/methods/test_finite_transition_v2_method.py",
             "fastvideo/tests/train/methods/test_videoalign_audit.py",

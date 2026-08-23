@@ -132,6 +132,22 @@ def test_mean_gaussian_log_prob_is_dimension_normalized() -> None:
     assert float(value) == pytest.approx(expected)
 
 
+def test_mean_gaussian_log_prob_preserves_small_bfloat16_policy_shift() -> None:
+    action = torch.zeros((1, 4096), dtype=torch.bfloat16)
+    mean_before = torch.zeros_like(action)
+    mean_after = torch.full_like(action, 0.01)
+    std = torch.ones((1, 1), dtype=torch.bfloat16)
+
+    before = gaussian_log_prob_mean(action, mean_before, std)
+    after = gaussian_log_prob_mean(action, mean_after, std)
+    delta = after - before
+
+    assert before.dtype == torch.float32
+    assert float(delta.abs()) > 1.0e-5
+    expected = -0.5 * float(mean_after[0, 0]) ** 2
+    assert float(delta) == pytest.approx(expected, rel=2.0e-2)
+
+
 def test_group_advantages_are_centered_and_clipped() -> None:
     advantages, mean, std = group_advantages(
         torch.tensor([0.0, 1.0, 2.0]),

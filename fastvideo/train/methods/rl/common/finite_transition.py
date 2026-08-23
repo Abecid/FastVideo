@@ -103,10 +103,18 @@ def gaussian_log_prob_mean(
         )
     if torch.any(std <= 0):
         raise ValueError("std must be strictly positive")
-    standardized = (action.detach() - mean) / std
+    # The latent policy normally runs in bf16. Reducing millions of bf16 log
+    # density terms directly can quantize a real optimizer-step change to
+    # exactly zero, which also blinds the target-KL controller. Keep gradients
+    # through ``mean`` while doing the likelihood arithmetic and reduction in
+    # float32.
+    action_float = action.detach().float()
+    mean_float = mean.float()
+    std_float = std.float()
+    standardized = (action_float - mean_float) / std_float
     log_prob = (
         -0.5 * standardized.square()
-        - torch.log(std)
+        - torch.log(std_float)
         - 0.5 * LOG_TWO_PI
     )
     return log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
