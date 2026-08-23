@@ -83,21 +83,26 @@ training:
 ## RL Examples
 
 - DiffusionNFT Wan video RL: see `examples/train/diffusion_nft_wan_video.md`.
-- **Authoritative AnyFlow finite-transition v2 experiment and run order:**
-  `examples/train/finite_transition_v2_execution_plan.md`.
-- **Authoritative Modal launcher:**
-  `modal_train_finite_transition_v2_complete.py`.
-- **2026-08-23 implementation, repair, and execution report:**
+- **Current next AnyFlow baseline — actual frozen-buffer, multi-minibatch GRPO:**
+  `examples/train/finite_transition_grpo_v3_execution_guide.md`.
+- **GRPO v3 Modal launcher:**
+  `modal_train_finite_transition_grpo_v3.py`.
+- GRPO v3 source config:
+  `examples/train/configs/rl/wan/finite_transition_grpo_v3_anyflow_videoalign.yaml`.
+- The v2 implementation/execution plan and its negative single-update baseline:
+  `examples/train/finite_transition_v2_execution_plan.md` and
   `examples/train/finite_transition_v2_execution_report_2026-08-23.md`.
+- The v2 Modal launcher is retained for reproduction only:
+  `modal_train_finite_transition_v2_complete.py`.
 - Coding-agent guardrails covering scheduler, ASFMC, reward statistics,
-  target-KL calibration, reward auditing, paired validation, and stop rules:
+  reward auditing, paired validation, and stop rules:
   `examples/train/finite_transition_posterior_execution_guardrails.md`.
 - The first FTPP/GRPO run's schedule diagnosis and corrected-run postmortem:
   `examples/train/finite_transition_posterior_postmortem.md`.
 - The original single-transition FTPP experiment is archived in
   `examples/train/finite_transition_posterior_wan.md`.
 - The intermediate `finite_transition_reliable*` path is retained for historical
-  comparison; do not use it instead of v2 for new scientific runs.
+  comparison; do not use it instead of GRPO v3 for the next scientific run.
 
 ## Directory Layout
 
