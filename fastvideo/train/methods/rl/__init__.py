@@ -2,6 +2,9 @@
 """RL training methods."""
 
 from fastvideo.train.methods.rl.diffusion_nft import DiffusionNFTMethod
+from fastvideo.train.methods.rl.finite_transition_grpo_v3 import (
+    FiniteTransitionGRPOV3Method,
+)
 from fastvideo.train.methods.rl.finite_transition_posterior import (
     FiniteTransitionPosteriorMethod,
 )
@@ -25,6 +28,7 @@ __all__ = [
     "AuditedReliableFiniteTransitionMethod",
     "CalibratedReliableFiniteTransitionMethod",
     "DiffusionNFTMethod",
+    "FiniteTransitionGRPOV3Method",
     "FiniteTransitionPosteriorMethod",
     "FiniteTransitionV2FinalMethod",
     "ReliableFiniteTransitionMethod",
