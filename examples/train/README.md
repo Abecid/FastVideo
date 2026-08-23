@@ -87,6 +87,8 @@ training:
   `examples/train/finite_transition_v2_execution_plan.md`.
 - **Authoritative Modal launcher:**
   `modal_train_finite_transition_v2_complete.py`.
+- **2026-08-23 implementation, repair, and execution report:**
+  `examples/train/finite_transition_v2_execution_report_2026-08-23.md`.
 - Coding-agent guardrails covering scheduler, ASFMC, reward statistics,
   target-KL calibration, reward auditing, paired validation, and stop rules:
   `examples/train/finite_transition_posterior_execution_guardrails.md`.
