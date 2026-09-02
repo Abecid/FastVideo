@@ -1,0 +1,115 @@
+# One-H100 topology smoke. This is intentionally compact and is not a
+# production-quality configuration. All constraints live here rather than in
+# the Modal wrapper, so the same config runs on any cloud or local node.
+models:
+  student:
+    _target_: fastvideo.train.models.minimax_h3.MiniMaxH3RVMModel
+    init_from: artifacts/rvm_h3/models/fasth3
+    trainable: true
+    enable_gradient_checkpointing_type: full
+    attention_backend: VIDEO_SPARSE_ATTN_H3
+    lora:
+      enable: true
+      rank: 1
+      alpha: 1
+      target_modules: [to_q, to_k, to_v, to_out]
+
+method:
+  _target_: fastvideo.train.methods.rl.RVMWithLocalMetricsMethod
+  samples_per_prompt: 2
+  prompt_groups_per_rollout: 1
+  optimizer_updates_per_rollout: 1
+  advantage_scale: 0.1
+  advantage_eps: 1.0e-4
+  advantage_clip: 5.0
+  positive_only_steps: 1
+  video_anchor_beta: 0.0
+  audio_anchor_beta: 1.0e-3
+  audio_loss_weight: 1.0
+  max_grad_norm: 1.0
+  reward_device: cuda
+  sampling:
+    denoising_steps: [1000, 750, 500, 250]
+    attn_kind: vsa
+  training_timestep:
+    mode: continuous_uniform
+    min: 0.0
+    max: 1.0
+  reward_fn:
+    rewards:
+      videoalign_ta: 1.5
+      videoalign_mq: 1.0
+      hpsv3_general: 0.1
+      hpsv3_percentile: 0.1
+      dynamic_tracking: 0.7
+    options:
+      videoalign_ta:
+        device: cpu
+      videoalign_mq:
+        device: cpu
+      hpsv3_general:
+        device: cpu
+        max_frames: 4
+      hpsv3_percentile:
+        device: cpu
+        max_frames: 4
+      dynamic_tracking:
+        device: cpu
+        frame_pairs: 4
+        top_fraction: 0.05
+        resize_short_edge: 256
+        pretrained: true
+  validation:
+    every_steps: 0
+    num_prompts: 8
+    data_path: artifacts/rvm_h3/data/eval
+    seed: 4242
+    run_at_start: false
+    log_samples: true
+    log_sample_limit: 8
+    save_videos: true
+
+training:
+  distributed:
+    num_gpus: 1
+    sp_size: 1
+    tp_size: 1
+    hsdp_replicate_dim: 1
+    hsdp_shard_dim: 1
+  data:
+    data_path: artifacts/rvm_h3/data/train_smoke
+    preprocessed_data_type: text_only
+    dataloader_num_workers: 0
+    train_batch_size: 1
+    training_cfg_rate: 0.0
+    seed: 42
+    num_latent_t: 12
+    num_height: 320
+    num_width: 576
+    num_frames: 39
+  optimizer:
+    learning_rate: 5.0e-6
+    betas: [0.9, 0.999]
+    weight_decay: 1.0e-4
+    lr_scheduler: constant
+    lr_warmup_steps: 0
+  loop:
+    max_train_steps: 1
+    gradient_accumulation_steps: 1
+  checkpoint:
+    output_dir: outputs/rvm_h3/modal_1gpu
+    training_state_checkpointing_steps: 1
+    checkpoints_total_limit: 2
+  tracker:
+    project_name: fasth3-rvm
+    run_name: rvm-h3-1gpu-smoke
+  model:
+    precondition_outputs: false
+    enable_gradient_checkpointing_type: full
+  vsa_sparsity: 0.9
+  vsa_cache_tile_buf: false
+  model_path: artifacts/rvm_h3/models/fasth3
+  dit_precision: bf16
+
+callbacks: {}
+pipeline: {}
