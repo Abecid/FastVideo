@@ -6,6 +6,8 @@
 - Branched from: `adam/h3-rvm-posttraining`
 - Base commit: `74907dd347805e12fb12b8f093afc41d6184d312`
 - Downstream stage retained unchanged: paper-faithful on-policy FastH3 RVM
+- PeRFlow source audit: `magic-research/piecewise-rectified-flow@87bac762f049d069497e83a76f528f007e9adabd`
+- Reference training path: `scripts/perflow_accelerate_sd.py`
 
 This document is the durable design contract for the implementation. The living execution record is [`H3_PERFLOW_PROGRESS.md`](H3_PERFLOW_PROGRESS.md).
 
@@ -33,50 +35,112 @@ existing paper-faithful on-policy RVM
 
 Use **reward-filtered Piecewise Rectified Flow (PeRFlow)** for H3 teacher distillation.
 
-For one selected teacher trajectory, let the adjacent cached anchors be
+The official PeRFlow velocity-matching recipe samples a query time inside a teacher window, linearly interpolates the window endpoints, and regresses the endpoint secant velocity. H3 requires one careful adaptation: video and audio share one base timestep but apply different scheduler shifts, so the two modalities are straightened in their own sigma coordinates.
+
+Let adjacent cached anchors be
 
 \[
-(z_m,t_m),\qquad (z_{m+1},t_{m+1}),
-\]
-
-where `t` is FastH3 model time, increasing from noise to clean data. Draw
-
-\[
-s\sim\mathcal U(0,1),
-\]
-
-and construct
-
-\[
-t=(1-s)t_m+s t_{m+1},
+(z_{v,m},z_{a,m},\tau_m),
 \qquad
-z_t=(1-s)z_m+s z_{m+1}.
-\]
-
-The exact velocity of this straight segment is
-
-\[
-u_m=\frac{z_{m+1}-z_m}{t_{m+1}-t_m}.
-\]
-
-Train FastH3 with
-
-\[
-\mathcal L_{\mathrm{PeRFlow}}
-=
-\mathbb E\left[
-\rho\!\left(v_\theta(z_t,t,c)-\operatorname{sg}(u_m)\right)
-\right],
+(z_{v,m+1},z_{a,m+1},\tau_{m+1}),
 \]
 
 where:
 
-- `v_θ` is the existing FastH3 packed video/audio velocity model;
-- `c` is the original H3 prompt conditioning;
-- `sg` stops gradients through cached teacher targets;
-- `ρ` is Huber loss by default, with MSE as an explicit ablation.
+- \(v\) denotes video;
+- \(a\) denotes audio;
+- \(\tau\) is the repository’s shared base timestep, descending from `1000` to `0`;
+- \(\sigma_v(\tau)\) and \(\sigma_a(\tau)\) are the existing H3 video and audio noise-amount maps, with native shifts `12` and `3`.
 
-FastH3’s repository timestep convention is decreasing `[1000, 750, 500, 250, 0]`, while the corresponding model-time convention is increasing `[0, 0.25, 0.5, 0.75, 1]`. The implementation must convert through the existing model-time helper and must never silently remove the sign of the interval denominator.
+Draw one shared fraction
+
+\[
+s\sim\mathcal U(0,1)
+\]
+
+and query the shared base schedule at
+
+\[
+\tau_q=(1-s)\tau_m+s\tau_{m+1}.
+\]
+
+For each modality \(j\in\{v,a\}\), define
+
+\[
+\alpha_j
+=
+\frac{
+\sigma_j(\tau_q)-\sigma_j(\tau_m)
+}{
+\sigma_j(\tau_{m+1})-\sigma_j(\tau_m)
+},
+\]
+
+\[
+z_{j,q}
+=
+z_{j,m}
++
+\alpha_j
+\left(z_{j,m+1}-z_{j,m}\right),
+\]
+
+and the piecewise-constant target field
+
+\[
+u_{j,m}
+=
+\frac{
+z_{j,m+1}-z_{j,m}
+}{
+\sigma_j(\tau_{m+1})-\sigma_j(\tau_m)
+}.
+\]
+
+FastH3’s packed transformer predicts `noise - clean`, which is the derivative of
+
+\[
+x_{\sigma}=(1-\sigma)x_0+\sigma\epsilon
+\]
+
+with respect to \(\sigma\). Therefore the sigma-domain denominator is required. Using the raw base-timestep delta for both modalities would be wrong, and taking the denominator’s absolute value would reverse the field because cached trajectories run from high sigma to low sigma.
+
+Train with separate modality reductions:
+
+\[
+\mathcal L_{\mathrm{PeRFlow}}
+=
+\mathcal L_v
++
+\lambda_a\mathcal L_a
++
+\beta\mathcal L_{\mathrm{anchor}},
+\]
+
+\[
+\mathcal L_j
+=
+\mathbb E\left[
+w_i\,
+\rho\!\left(
+v_{\theta,j}(z_q,\tau_q,c)
+-
+\operatorname{sg}(u_{j,m})
+\right)
+\right].
+\]
+
+Here:
+
+- \(v_{\theta,j}\) is FastH3’s existing packed velocity predictor restricted to modality \(j\);
+- \(c\) is the original H3 prompt conditioning;
+- \(\operatorname{sg}\) stops gradients through cached teacher states and targets;
+- \(w_i=1/q\) for every retained candidate, normalized as a weighted mean;
+- \(\rho\) is **MSE by default**, matching the official PeRFlow velocity-matching implementation;
+- Huber is available only as an explicit robustness ablation;
+- \(\mathcal L_{\mathrm{anchor}}\) is an optional LoRA-off function-space anchor and is disabled by default.
+
+The same sampled base timestep is sent through the existing H3 model adapter, preserving its packed row timesteps, VSA metadata, and distinct video/audio schedule shifts.
 
 ## Reward filtering contract
 
@@ -138,9 +202,10 @@ These already perform dense H3 sampling, record the exact five FastH3 boundaries
 ### Cached trajectory loading
 
 - `fastvideo.dataset.h3_rest_cache`
+- `fastvideo.dataset.h3_perflow_cache`
 - `fastvideo.train.models.minimax_h3.MiniMaxH3RESTModel`
 
-PeRFlow adds an opt-in deterministic top-q view over this cache. Existing H3 REST behavior must remain backward compatible.
+PeRFlow adds an opt-in deterministic top-q view over this cache. Existing H3 REST behavior remains backward compatible.
 
 ### FastH3 training path
 
@@ -163,7 +228,7 @@ PeRFlow adds an opt-in deterministic top-q view over this cache. Existing H3 RES
 - released four-forward FastH3 VSA rollout
 - existing evaluation, export, and inference tooling
 
-No RVM rollout or loss code should be copied into PeRFlow.
+No RVM rollout or loss code is copied into PeRFlow.
 
 ## Task subsets
 
@@ -172,27 +237,27 @@ No RVM rollout or loss code should be copied into PeRFlow.
 - [x] Create remote feature branch from current RVM/H3-REST head.
 - [x] Audit H3 REST cache, sampler, model, and RVM interfaces.
 - [x] Write this plan and the living progress report.
-- [ ] Record exact source references and implementation non-goals in tests/docs.
+- [x] Record exact source references and implementation non-goals in tests/docs.
 
 Acceptance: the design explicitly distinguishes supervised teacher transfer from on-policy RVM.
 
 ### T1 — Deterministic reward-filtered cache view
 
-- [ ] Add pure top-q selection utilities.
-- [ ] Extend `H3RESTCacheDataset` with an opt-in selection configuration while preserving existing REST defaults.
-- [ ] Validate complete prompt groups before ranking.
-- [ ] Fingerprint the selection policy and expose selected trajectory metadata.
-- [ ] Add tests for ties, malformed prompt groups, non-finite scores, equal weights, and deterministic ordering.
+- [x] Add pure top-q selection utilities.
+- [x] Add an opt-in selected cache view while preserving existing REST defaults.
+- [x] Validate complete prompt groups before ranking.
+- [x] Fingerprint the selection policy and expose selected trajectory metadata.
+- [x] Add tests for ties, malformed prompt groups, non-finite scores, equal weights, and deterministic ordering.
 
 Acceptance: for every prompt, exactly `q` of `K` candidates are exposed, with weight `1/q`, reproducibly across process restarts and distributed ranks.
 
 ### T2 — Piecewise interpolation and velocity-loss primitives
 
-- [ ] Add model-time conversion, continuous segment interpolation, and secant-target helpers.
-- [ ] Add Huber and MSE packed-modality losses.
-- [ ] Keep video and audio reductions separate before weighting.
-- [ ] Detach cached targets and fail on zero/non-finite time intervals.
-- [ ] Add exact linear-field and gradient tests.
+- [x] Add continuous base-timestep sampling and modality-specific sigma interpolation.
+- [x] Add MSE and Huber packed-modality losses.
+- [x] Keep video and audio reductions separate before weighting.
+- [x] Detach cached targets and fail on zero/non-finite sigma intervals.
+- [x] Add exact linear-field, sign, weighting, and gradient tests.
 
 Acceptance: an exact linear velocity predictor has zero loss and teacher tensors receive no gradients.
 
@@ -259,7 +324,7 @@ This separation is intentional: teacher inference and reward scoring happen once
 
 1. Liu, Gong, and Liu, **Flow Straight and Fast: Learning to Generate and Transfer Data with Rectified Flow**, ICLR 2023. https://arxiv.org/abs/2209.03003
 2. Yan et al., **PeRFlow: Piecewise Rectified Flow as Universal Plug-and-Play Accelerator**, NeurIPS 2024. https://arxiv.org/abs/2405.07510
-3. Official PeRFlow implementation. https://github.com/magic-research/piecewise-rectified-flow
+3. Official PeRFlow implementation, source pin `87bac762f049d069497e83a76f528f007e9adabd`. https://github.com/magic-research/piecewise-rectified-flow
 4. Liu et al., **InstaFlow: One Step is Enough for High-Quality Diffusion-Based Text-to-Image Generation**. https://arxiv.org/abs/2309.06380
 5. Li et al., **T2V-Turbo: Breaking the Quality Bottleneck of Video Consistency Model with Mixed Reward Feedback**. https://arxiv.org/abs/2405.18750
 6. Yin et al., **One-step Diffusion with Distribution Matching Distillation**. https://arxiv.org/abs/2311.18828
