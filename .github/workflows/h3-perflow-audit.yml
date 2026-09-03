@@ -1,0 +1,113 @@
+name: H3 PeRFlow focused audit
+
+on:
+  push:
+    branches:
+      - adam/h3-teacher-perflow-distill
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-cpu-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv==0.7.2
+
+      - name: Install FastVideo development environment
+        run: |
+          python use_uv.py
+          uv sync --group dev
+
+      - name: Compile changed PeRFlow entry points
+        run: |
+          uv run python -m py_compile \
+            fastvideo/dataset/h3_perflow_cache.py \
+            fastvideo/train/methods/knowledge_distillation/h3_perflow.py \
+            fastvideo/train/methods/knowledge_distillation/h3_perflow_utils.py \
+            fastvideo/train/models/minimax_h3/minimax_h3_perflow.py \
+            fastvideo/train/models/minimax_h3/minimax_h3_rvm.py \
+            fastvideo/train/utils/lora_init.py \
+            examples/train/rvm_h3/verify_h3_perflow_cache.py
+
+      - name: Import-cycle smoke
+        run: |
+          uv run python - <<'PY'
+          import fastvideo.dataset.h3_perflow_cache
+          import fastvideo.train.methods.knowledge_distillation.h3_perflow
+          import fastvideo.train.models.minimax_h3.minimax_h3_perflow
+          from fastvideo.train.methods.knowledge_distillation import H3PeRFlowMethod
+          from fastvideo.train.models.minimax_h3 import MiniMaxH3PeRFlowModel
+          assert H3PeRFlowMethod.__name__ == "H3PeRFlowMethod"
+          assert MiniMaxH3PeRFlowModel.__name__ == "MiniMaxH3PeRFlowModel"
+          PY
+
+      - name: Run focused CPU contracts
+        run: |
+          uv run pytest -q \
+            fastvideo/tests/train/methods/test_h3_perflow_cache.py \
+            fastvideo/tests/train/methods/test_h3_perflow_utils.py \
+            fastvideo/tests/train/methods/test_h3_perflow_method.py \
+            fastvideo/tests/train/methods/test_h3_perflow_configs.py \
+            fastvideo/tests/train/utils/test_lora_stage_init.py \
+            fastvideo/tests/train/methods/test_h3_rest_cache.py \
+            fastvideo/tests/train/methods/test_h3_rest_method.py \
+            fastvideo/tests/train/methods/test_h3_rest_utils.py \
+            fastvideo/tests/train/methods/test_minimax_h3_dmd2.py \
+            fastvideo/tests/train/methods/test_rvm_configs.py \
+            fastvideo/tests/train/methods/test_rvm_utils.py
+
+      - name: Check operator scripts
+        run: |
+          bash -n \
+            examples/train/rvm_h3/13_build_h3_perflow_teacher_cache.sh \
+            examples/train/rvm_h3/14_verify_h3_perflow_cache.sh \
+            examples/train/rvm_h3/15_run_h3_perflow_1gpu_smoke.sh \
+            examples/train/rvm_h3/16_run_h3_perflow_topology_smoke.sh \
+            examples/train/rvm_h3/17_run_h3_perflow_pilot.sh \
+            examples/train/rvm_h3/18_run_h3_perflow_full.sh \
+            examples/train/rvm_h3/19_export_h3_perflow_lora.sh \
+            examples/train/rvm_h3/20_run_h3_perflow_to_rvm.sh
+
+      - name: Parse PeRFlow YAMLs
+        run: |
+          uv run python - <<'PY'
+          from pathlib import Path
+          import yaml
+          paths = sorted(
+              Path("examples/train/configs/knowledge_distillation/minimax_h3")
+              .glob("h3_perflow_*.yaml")
+          )
+          assert len(paths) == 3, paths
+          for path in paths:
+              value = yaml.safe_load(path.read_text(encoding="utf-8"))
+              assert isinstance(value, dict), path
+          PY
+
+      - name: Run pre-commit on feature diff
+        run: |
+          mapfile -t files < <(
+            git diff --name-only \
+              74907dd347805e12fb12b8f093afc41d6184d312 HEAD -- \
+              '*.py' '*.sh' '*.yaml' '*.yml' '*.md'
+          )
+          if ((${#files[@]})); then
+            uv run pre-commit run --show-diff-on-failure --color=always \
+              --files "${files[@]}"
+          fi
+
+      - name: Reject whitespace errors
+        run: git diff --check 74907dd347805e12fb12b8f093afc41d6184d312...HEAD
