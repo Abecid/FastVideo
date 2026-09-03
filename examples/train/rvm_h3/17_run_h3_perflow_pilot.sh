@@ -18,12 +18,16 @@ if [[ "${RVM_SP_SIZE}" != "4" ]] || (( NUM_GPUS % RVM_SP_SIZE != 0 )); then
     exit 2
 fi
 
+METADATA_ONLY=1
+if [[ "${PERFLOW_VERIFY_FULL_HASHES:-0}" == "1" ]]; then
+    METADATA_ONLY=0
+fi
 PERFLOW_EXPECT_K="${PERFLOW_EXPECT_K:-8}" \
 PERFLOW_EXPECT_PROMPTS="${PERFLOW_EXPECT_PROMPTS:-100}" \
 PERFLOW_SELECTED_PER_PROMPT="${PERFLOW_SELECTED_PER_PROMPT:-2}" \
 PERFLOW_RANKING_KEY="${PERFLOW_RANKING_KEY:-mixed_advantage}" \
 PERFLOW_REQUIRE_REWARDS="${PERFLOW_REQUIRE_REWARDS:-videoalign_ta,mj_video_coherence_consistency,mj_video_fineness,dynamic_tracking}" \
-PERFLOW_METADATA_ONLY="${PERFLOW_VERIFY_FULL_HASHES:-0}" \
+PERFLOW_METADATA_ONLY="${METADATA_ONLY}" \
     bash examples/train/rvm_h3/14_verify_h3_perflow_cache.sh \
         "${H3_REST_FULL_CACHE}"
 
