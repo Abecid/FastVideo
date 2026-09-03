@@ -50,6 +50,15 @@ class MiniMaxH3RVMModel(MiniMaxH3DMDModel):
         if not self._enable_lora_if_configured(self.transformer):
             raise RuntimeError("Failed to enable the configured H3 quality LoRA")
 
+        # The frozen 35B base can remain BF16, but optimizer updates of a small
+        # LoRA at 1e-5 are easily rounded away in BF16 parameter storage. Keep
+        # trainable adapter masters in FP32 before loading a previous stage's
+        # exported FP32 tensors; loading into BF16 first would irreversibly
+        # quantize the continuation checkpoint.
+        for parameter in self.transformer.parameters():
+            if parameter.requires_grad and parameter.dtype != torch.float32:
+                parameter.data = parameter.data.to(dtype=torch.float32)
+
         self.lora_init_summary: TrainingLoraLoadSummary | None = None
         if lora_init_from is not None and str(lora_init_from).strip():
             self.lora_init_summary = load_training_lora_weights(
@@ -62,14 +71,6 @@ class MiniMaxH3RVMModel(MiniMaxH3DMDModel):
                 self.lora_init_summary.sha256,
                 self.lora_init_summary.layer_count,
             )
-
-        # The frozen 35B base can remain BF16, but optimizer updates of a small
-        # LoRA at 1e-5 are easily rounded away in BF16 parameter storage. Keep
-        # only trainable adapter masters in FP32; every LoRA forward casts them
-        # to the activation dtype before its matmuls.
-        for parameter in self.transformer.parameters():
-            if parameter.requires_grad and parameter.dtype != torch.float32:
-                parameter.data = parameter.data.to(dtype=torch.float32)
 
     def refresh_vsa_metadata(
         self,
