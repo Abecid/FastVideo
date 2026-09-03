@@ -13,9 +13,9 @@ This file is updated after every completed task subset. A task is not marked com
 
 | Task | Status | Remote commit | Notes |
 |---|---|---|---|
-| T0 design and provenance contract | In progress | `cd11e0b56e73a7166fcd055c4fb147ab7a5663ec` | Plan committed; reference and source audit in progress |
-| T1 reward-filtered cache view | Not started | — | — |
-| T2 PeRFlow interpolation/loss primitives | Not started | — | — |
+| T0 design and provenance contract | Complete | `cd11e0b56e73a7166fcd055c4fb147ab7a5663ec`, `e4ce6a73cfac852ca2221aba06a1e6b0d99434d2` | Plan, references, source audit, task decomposition, and progress log committed |
+| T1 reward-filtered cache view | Code complete; full suite pending | `171ded3722c1f600290123ea2751ca49a2147b41`, `9f5c5e93fd0bebdecc1c2e094a9076e2e1c22264` | Deterministic top-q view and focused tests committed; remote head verified |
+| T2 PeRFlow interpolation/loss primitives | In progress | — | Continuous segment math and packed Huber loss next |
 | T3 `H3PeRFlowMethod` | Not started | — | — |
 | T4 configs and execution scripts | Not started | — | — |
 | T5 validation and evaluation | Not started | — | — |
@@ -67,9 +67,40 @@ Key findings:
 Committed the durable implementation plan at:
 
 - `cd11e0b56e73a7166fcd055c4fb147ab7a5663ec` — `docs: plan reward-filtered H3 PeRFlow distillation`
+- `e4ce6a73cfac852ca2221aba06a1e6b0d99434d2` — `docs: start H3 PeRFlow execution log`
 
 The plan records the mathematical objective, time convention, top-q contract, reuse map, alternatives rejected, non-goals, task subsets, evaluation controls, and primary references.
 
+### 2026-09-02 — T1 deterministic reward-filtered cache view
+
+Implemented `fastvideo/dataset/h3_perflow_cache.py` as a non-destructive view over the existing immutable H3 REST cache.
+
+Implementation details:
+
+- Groups manifest entries by `prompt_id` and verifies every group has the same complete candidate set `0..K-1`.
+- Supports ranking by `mixed_advantage`, `reward_scores.<name>`, or `reward_advantages.<name>`.
+- Rejects missing, boolean, non-numeric, NaN, and infinite ranking values.
+- Sorts by descending score, then ascending `candidate_index`, then `trajectory_id` for deterministic ties.
+- Retains exactly `q` trajectories per prompt.
+- Assigns every retained trajectory equal positive weight `1/q`; no reward sign or magnitude enters the later supervised gradient.
+- Fingerprints the selection schema, ranking key, `K`, `q`, segment count, prompt IDs, selected trajectory IDs, ranks, and scores.
+- Rebuilds the distributed sampler over only the selected examples while preserving the original cache files.
+- Exposes selection rank, score, equal weight, and fingerprint in each training batch.
+- Leaves the existing `H3RESTCacheDataset` and all REST configs unchanged.
+
+Remote commits:
+
+- `171ded3722c1f600290123ea2751ca49a2147b41` — `feat: add deterministic top-q H3 teacher cache view`
+- `9f5c5e93fd0bebdecc1c2e094a9076e2e1c22264` — `test: cover deterministic H3 PeRFlow cache selection`
+
+Focused tests cover deterministic results under manifest reordering, stable tie-breaking, equal selected weights, raw reward-component ranking, incomplete groups, non-finite scores, selected dataset length, selected trajectory identities, and batch-level selection metadata.
+
+Static Python compilation of both new files succeeded before upload. The complete repository test suite has not yet run on this branch; that remains an explicit validation gate rather than an assumed result.
+
+Remote verification:
+
+- Verified branch head after T1: `9f5c5e93fd0bebdecc1c2e094a9076e2e1c22264`.
+
 ## Validation boundary
 
-No real H3/FastH3 GPU run has been executed on this new branch yet. Current completed work is branch creation, repository audit, and design/provenance documentation. GPU claims will remain explicitly gated in this report.
+No real H3/FastH3 GPU run has been executed on this new branch yet. Current completed work is branch creation, repository audit, design/provenance documentation, and the committed top-q cache view with focused tests. GPU and quality claims remain explicitly gated in this report.
