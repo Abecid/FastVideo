@@ -9,12 +9,14 @@ case "${MODE}" in
     compact)
         CONFIG="examples/train/configs/knowledge_distillation/minimax_h3/h3_rest_cache_4gpu_compact.yaml"
         CACHE_DIR="${H3_REST_COMPACT_CACHE}"
+        PROMPT_DATA="${RVM_SMOKE_DATA}"
         EXPECT_K=2
-        EXPECT_PROMPTS="${PERFLOW_EXPECT_PROMPTS:-2}"
+        EXPECT_PROMPTS="${PERFLOW_EXPECT_PROMPTS:-1}"
         ;;
     full)
         CONFIG="examples/train/configs/knowledge_distillation/minimax_h3/h3_rest_cache_4gpu_full.yaml"
         CACHE_DIR="${H3_REST_FULL_CACHE}"
+        PROMPT_DATA="${RVM_TRAIN_DATA}"
         EXPECT_K=8
         EXPECT_PROMPTS="${PERFLOW_EXPECT_PROMPTS:-100}"
         ;;
@@ -25,7 +27,7 @@ case "${MODE}" in
 esac
 
 require_path "${H3_TEACHER_MODEL_DIR}"
-require_path "${RVM_TRAIN_DATA}"
+require_path "${PROMPT_DATA}"
 require_path "${VIDEOALIGN_RUNTIME_PATH}"
 require_path "${VIDEOALIGN_CHECKPOINT_PATH}"
 require_path "${MJ_VIDEO_RUNTIME_PATH}"
@@ -55,7 +57,7 @@ python -m torch.distributed.run \
     "${OVERWRITE_ARGS[@]}" \
     --models.student.init_from "${H3_TEACHER_MODEL_DIR}" \
     --training.model_path "${H3_TEACHER_MODEL_DIR}" \
-    --training.data.data_path "${RVM_TRAIN_DATA}"
+    --training.data.data_path "${PROMPT_DATA}"
 
 PERFLOW_EXPECT_K="${EXPECT_K}" \
 PERFLOW_EXPECT_PROMPTS="${EXPECT_PROMPTS}" \
@@ -67,6 +69,7 @@ PERFLOW_METADATA_ONLY=0 \
 cat <<EOF
 Completed immutable H3 teacher cache for PeRFlow:
   mode: ${MODE}
+  prompt data: ${PROMPT_DATA}
   cache: ${CACHE_DIR}
   K: ${EXPECT_K}
   prompts: ${EXPECT_PROMPTS}
