@@ -14,7 +14,8 @@ models:
     lora:
       enable: true
       rank: 128
-      alpha: 128
+      # Match every production RVM config for function-preserving continuation.
+      alpha: 64
       target_modules: [to_q, to_k, to_v, to_out]
 
 method:
